@@ -24,7 +24,8 @@ Phase 0's four credential-dependent items are still open on the same runbook.
 | 2–7 | see §28b | Not started — Phase 2 next |
 
 **Test counts this session:** 148 unit, 28 rules, 44 emulator integration. Lint, typecheck and
-`next build` clean.
+`next build` clean. **CI is green** on PR #1 — the first successful run this repo has ever had
+(see deviation 18 for why it had never run at all, and what its first run turned up).
 
 ---
 
