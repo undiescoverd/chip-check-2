@@ -4,12 +4,6 @@
 **Rhythm:** one phase per session. Don't start the next phase until the current one's DoD is
 ticked — agent items by the agent, **(Ian)** items by Ian. The agent never ticks an (Ian) item.
 
-> **This checklist predates the seven-finding amendment.** A review of v1 produced seven
-> findings that were approved for folding into the PRD but have not been applied yet. They add
-> Definition of Done items to Phases 1, 3 and 4 (staff connection indicator, order age counter,
-> undo-on-clear via a new `unclear` action, ready-list shed nudge, orders-route rate limit).
-> **Regenerating this file from the amended spec is the first task of that session.**
-
 ---
 
 ## Current status
@@ -20,7 +14,19 @@ Ian's infrastructure setup. See `docs/setup-ian.md` for the ordered runbook.
 | Phase | Model used | State |
 |---|---|---|
 | 0 | Opus 5 | Agent half done; 4 DoD items blocked on Ian |
-| 1–7 | see §28b | Not started |
+| — | Opus 5 | PRD amendment applied (seven review findings + spec/reality reconciliation) |
+| 1–7 | see §28b | Not started — Phase 1 next, with the amended orders API |
+
+---
+
+## Amendment applied
+
+The seven v1-review findings are now folded into `chipcheck_v2.md` (§4, §9, §11–§15, §20, §22,
+§23–§25, Part H, Part I, §31). Three were already fixed in v2 and needed no change; three were
+carried forward untouched (staff connection indicator, undo on clear, ready-list shed nudge) and
+are now specified; one was new scope (order age counter). The same pass reconciled the spec with
+what Phase 0 actually built — see deviations 1–4 below, which are now reflected in the spec
+itself rather than only here.
 
 ---
 
@@ -99,6 +105,12 @@ were caught by not taking the spec's install instructions at face value.
 - [ ] Two concurrent `add` requests for the same number → exactly one 200 and one 409 (script fires them with `&`).
 - [ ] Firestore console shows the composite indexes as **Enabled** for `chipcheck-dev`. **(Ian)**
 - [ ] Cron route returns 401 without the bearer, 200 with it, and clears a seeded order whose `createdAt` was set 7 h in the past by the seed script.
+- [ ] `clear` then `unclear` restores the order **and** re-creates `activeNumbers/{orderNumber}`; an order cleared while `ready` comes back `ready`, not `preparing`.
+- [ ] `unclear` after the same number has been re-added → 409 `duplicate_order` carrying the active order; the re-added order is untouched.
+- [ ] `unclear` on an order cleared by the purge or by `clearAll` → 409 `invalid_transition`.
+- [ ] `unclear` more than 60 s after the clear → 409 `invalid_transition`, and the lock doc is left free.
+- [ ] `clearAll` with `{ status: "ready", olderThanSeconds: N }` clears only matching orders and leaves preparing orders and newer ready orders active.
+- [ ] 61st `add` within a minute from one IP → 429 `rate_limited` with `retryAfterSeconds`; 6th `clearAll` → 429; `markReady`/`recall`/`clear`/`unclear` are never rate-limited.
 - [ ] No `NEXT_PUBLIC_` variable contains a secret (grep in CI).
 
 ### Phase 2 — Owner auth, shops, PIN
@@ -122,7 +134,10 @@ were caught by not taking the spec's install instructions at face value.
 - [ ] Add on tablet A → card appears on tablet B within 1.5 s (Ian, two devices or two browsers on the `dev` alias; measured by eye against the display clock). **(Ian)**
 - [ ] Double-tapping Ready fires exactly one request (Playwright counts network calls).
 - [ ] Wrong PIN shows "Wrong PIN" inline without leaving the gate; correct PIN shows the console without reload flicker.
-- [ ] Kill the network on the tablet for 30 s: header still renders, buttons produce "Couldn't reach the server", state reconciles when back online. **(Ian)**
+- [ ] Kill the network on the tablet for 30 s: the header dot flips to amber "Reconnecting" (this is the whole point — writes would still succeed over HTTP, so without the dot the tablet looks healthy while its list goes stale), buttons produce "Couldn't reach the server", state reconciles when back online. **(Ian)**
+- [ ] With `targetPrepSeconds` set low on `test-shop`, a card's age crosses the threshold and switches to the heavier pill treatment, with no colour change to the row.
+- [ ] `Clear` shows the undo alert; Undo within 10 s restores the card; the alert dismisses on the next mutation; undoing a number that has been re-added shows "Couldn't undo — #{orderNumber} is active again".
+- [ ] The shed nudge appears only when ready orders exceed `readyTimeoutSeconds`, its count matches, and clearing it leaves preparing orders untouched.
 - [ ] Layout matches v1 at 390, 768, 1024, 1280 widths (Ian compares against the v1 site side by side; agent provides Playwright screenshots at those widths as PR artefacts). **(Ian)**
 - [ ] Playwright smoke green in CI against the `dev` alias.
 
@@ -133,6 +148,7 @@ were caught by not taking the spec's install instructions at face value.
 - [ ] TV at 1920×1080: two columns, tiles ≥ 190 px, header at `md:` sizes, no scrollbars with 12 tiles per column. **(Ian)**
 - [ ] Phone 390×844 via the printed QR: stacked columns, both headers visible, footer copy when empty. **(Ian)**
 - [ ] `?sound=1`: chime plays once per newly-ready number after one tap; no chime for numbers already ready at load. **(Ian)**
+- [ ] A display left open and untouched from load, then tapped once, chimes on the next ready order — proving `ctx.resume()` runs on the gesture; the "Tap to enable sound" hint disappears at that point. **(Ian)**
 - [ ] Wake Lock keeps the TV/tablet awake ≥ 15 min with the toggle on (device with screen timeout set to 2 min). **(Ian)**
 - [ ] Setting `readyTimeoutSeconds` in `/app/{slug}` changes how long ready tiles stay, with no deploy.
 - [ ] `/{slug}/qr` encodes `https://<NEXT_PUBLIC_SITE_URL>/{slug}/display` (the text under the QR shows it); printed page is white with only the card. **(Ian prints)**

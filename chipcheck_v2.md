@@ -180,6 +180,11 @@ Dependencies to drop from v1: `@supabase/supabase-js`, the bundled Geist fonts (
 | `/` | Three links (Staff / Display / Print QR) | Landing + sign-in **[v2 change]** |
 | Tests | None | Vitest + rules tests + Playwright smoke **[v1 gap fixed]** |
 | Display robustness | None | Wake Lock, `prefers-reduced-motion`, safe-area insets, `aria-live`, PWA manifest **[v2 change]** |
+| Staff connection state | Console destructures `{ orders, loading }` and drops `status`; a tablet with a stale listener looks completely healthy, because its own writes still succeed over HTTP | Live/Reconnecting dot on the console header, same markup as the display **[v1 gap fixed]** |
+| Order age | Not shown; a ticket added at 12:01 is visually identical to one added at 12:20, so a forgotten order is invisible until a customer complains | Elapsed counter on every card, escalating past `targetPrepSeconds` **[v2 change]** |
+| Undo | Individual `Clear` — the one fat-fingered on a greasy tablet 100× a service — is instant and unrecoverable from the UI, while `Clear All` gets a confirmation | 10 s undo affordance backed by an `unclear` action; `Clear All` keeps its modal **[v1 gap fixed]** |
+| Ready backlog | Staff list grows all service and nothing ever prompts a clear | Nudge to shed ready orders the customers can no longer see **[v2 change]** |
+| Write rate limit | None on the orders route | Per-shop limit on `add` and `clearAll` **[v1 gap fixed]** |
 
 ---
 
@@ -235,7 +240,9 @@ v2:
 
 ### 7.3 Fail-closed configuration **[v1 gap fixed]**
 
-`lib/env.ts` parses `process.env` with zod at module load on the server. Any missing **required** server secret (`FIREBASE_SERVICE_ACCOUNT_JSON`, `STAFF_SESSION_SECRET`, `CRON_SECRET`) throws, so every Route Handler returns 500 rather than silently opening writes. Stripe vars are required only when `BILLING_ENABLED=true`.
+`lib/env.ts` parses `process.env` with zod on the server. Any missing **required** server secret (`FIREBASE_SERVICE_ACCOUNT_JSON`, `STAFF_SESSION_SECRET`, `CRON_SECRET`) throws, so every Route Handler returns 500 rather than silently opening writes. Stripe vars are required only when `BILLING_ENABLED=true`.
+
+**Corrected in Phase 0:** the parse is *lazy and memoised* (`serverEnv()`, called at the top of each handler), not run at module load. A module-load throw would fail `next build` in any environment without runtime secrets — including CI, which is itself a Phase 0 Definition of Done item. The fail-closed guarantee is identical and is now unit-tested, including that error messages never echo a value.
 
 ## 8. Onboarding
 
@@ -272,6 +279,7 @@ shops/{shopId}                              PUBLIC (readable by anyone)
     ticketMinDigits: number (1–6)           default 1
     ticketMaxDigits: number (1–6, ≥ min)    default 4
     readyTimeoutSeconds: number (30–3600)   default 300
+    targetPrepSeconds: number (60–3600)     default 480     age-escalation threshold (§22.2)
     soundEnabled: boolean                   default false   (display chime without ?sound=1)
     timezone: string                        IANA, e.g. "Europe/London"
   }
@@ -395,7 +403,7 @@ const q = query(
 onSnapshot(q, { includeMetadataChanges: true }, snap => …, err => …);
 ```
 
-- Returns `{ orders, status, loading, pending, markPending, clearPending }` where `status: "connecting" | "connected" | "disconnected"` (same union as v1 so the display header's "Live"/"Reconnecting" dot is unchanged).
+- Returns `{ orders, status, loading, pending, markPending, clearPending, upsertLocal }` where `status: "connecting" | "connected" | "disconnected"` (same union as v1 so the display header's "Live"/"Reconnecting" dot is unchanged).
 - **Status derivation:** `connecting` until the first snapshot; then `connected` when the latest snapshot has `!metadata.fromCache`; `disconnected` when `metadata.fromCache && navigator.onLine === false`, or the error callback fires, or no server-sourced snapshot has arrived for 60 s while `document.visibilityState === "visible"` (Firestore's backoff can leave a tab serving cache silently). `online`/`offline` window events and `visibilitychange` re-evaluate immediately.
 - Firestore's client replays state on reconnect, so v1's manual "refetch on resubscribe" reconciliation is unnecessary **[v2 change]**. A `visibilitychange → visible` handler still forces a status re-check so an overnight-backgrounded tab shows "Reconnecting" honestly until the next server snapshot.
 - Sort key: `createdAt?.toMillis() ?? Date.now()` ascending (v1 sorted by `created_at` string).
@@ -410,6 +418,7 @@ v1 exported `upsertOrder` from `useOrders` but never called it; the console just
 - While an id is pending its `OrderCard` buttons are `disabled` (v1's `busy` prop, now driven by the pending set) so buttons can't double-fire.
 - `add` uses key `"add:" + orderNumber`; the Add button is disabled while that key is pending (v1's `adding` state).
 - The local overlay never *invents* rows; it only applies rows the server returned. Snapshot data always wins on conflict.
+- `unclear` (§13) uses the restored order's own id as its pending key. A failed undo — 409 because the number went active again, or because the 60 s server window closed — clears pending and shows the mapped copy (§23); it never re-inserts the row locally. The rule above already covers this, but the undo path is where "the overlay invents a row" would be most tempting and most wrong.
 
 ---
 
@@ -441,7 +450,7 @@ All handlers: `export const runtime = "nodejs"` (default; never `edge`), `export
 | `POST /api/shops/{shopId}/pin` | owner of shop | `{ pin: string /^\d{4,8}$/ }` | `204` | 400; 403; 404 |
 | `POST /api/shops/{slug}/staff/unlock` | public (rate-limited) | `{ pin: string }` | `200 { ok: true, expiresAt }` + sets `cc_staff` | 400; 401 `invalid_pin`; 404 `shop_not_found`; 429 `pin_locked { retryAfterSeconds }` |
 | `DELETE /api/shops/{slug}/staff/unlock` | any | — | `204`, clears `cc_staff` | — |
-| `POST /api/shops/{shopId}/orders` | staff cookie for `shopId` | discriminated union, below | `200 { order }` or `200 { cleared: n }` for `clearAll` | 400; 401 `unauthorized`; 402 `subscription_required` (`add` only); 404 `order_not_found`; 409 `duplicate_order` / `invalid_transition` |
+| `POST /api/shops/{shopId}/orders` | staff cookie for `shopId` | discriminated union, below | `200 { order }` or `200 { cleared: n }` for `clearAll` | 400; 401 `unauthorized`; 402 `subscription_required` (`add` only); 404 `order_not_found`; 409 `duplicate_order` / `invalid_transition`; 429 `rate_limited { retryAfterSeconds }` (`add` and `clearAll` only, §14.1) |
 | `GET /api/cron/purge-stale` | `Authorization: Bearer ${CRON_SECRET}` | — | `200 { shopsTouched, ordersCleared }` | 401 |
 | `POST /api/billing/checkout` | owner of shop | `{ shopId }` | `200 { url }` (Stripe Checkout URL) | 403; 404; 409 `already_subscribed`; 503 `billing_disabled` |
 | `POST /api/billing/portal` | owner of shop | `{ shopId }` | `200 { url }` (Customer Portal URL) | 403; 404 `no_customer`; 503 `billing_disabled` |
@@ -458,7 +467,10 @@ const OrdersBody = z.discriminatedUnion("action", [
   z.object({ action: z.literal("markReady"), id: DocId }),
   z.object({ action: z.literal("recall"),    id: DocId }),
   z.object({ action: z.literal("clear"),     id: DocId }),
-  z.object({ action: z.literal("clearAll") }),
+  z.object({ action: z.literal("unclear"),   id: DocId }),   // undo a staff clear (§22.2)
+  z.object({ action: z.literal("clearAll"),
+             status: z.enum(["preparing", "ready"]).optional(),
+             olderThanSeconds: z.number().int().min(0).optional() }),
 ]);
 const DocId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 ```
@@ -470,10 +482,15 @@ const DocId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 | `add` | `orderNumber` matches `^\d{min,max}$` for the shop; entitled (§15); no `activeNumbers/{orderNumber}` | Transaction: create `orders/{auto}` `{ orderNumber, status: "preparing", createdAt: server, readyAt: null, cleared: false, clearedAt: null, clearedBy: null }` + create lock doc. Then (outside the transaction, best-effort) run the opportunistic purge for this shop (§13.1). | the created order (with `createdAt` resolved by re-reading) |
 | `markReady` | order exists, `cleared == false`, `status == "preparing"` | `status = "ready"`, `readyAt = server` | updated order |
 | `recall` | exists, `cleared == false`, `status == "ready"` | `status = "preparing"`, `readyAt = null` | updated order |
-| `clear` | exists, `cleared == false` | `cleared = true`, `clearedAt = server`, `clearedBy = "staff"`; delete lock doc | updated order |
-| `clearAll` | — | query `cleared == false`; batched writes of 500: set cleared/clearedAt/`clearedBy = "clearAll"`, delete each lock doc | `{ cleared: n }` |
+| `clear` | exists, `cleared == false` | `cleared = true`, `clearedAt = server`, `clearedBy = "staff"`; delete lock doc. `status` is **not** changed, so an undo restores the order exactly as it was. | updated order |
+| `unclear` | exists; `cleared == true`; `clearedBy == "staff"`; `clearedAt > now − 60 s`; no `activeNumbers/{orderNumber}` currently held | Transaction: `cleared = false`, `clearedAt = null`, `clearedBy = null`, **and re-create the lock doc** pointing at this order id. `status` is untouched — an order cleared while `ready` comes back `ready`. | restored order |
+| `clearAll` | — | query `cleared == false`, then apply the optional filters: `status` matches, and `olderThanSeconds` measured against `readyAt` when `status == "ready"` else `createdAt`. Batched writes of 500: set cleared/clearedAt/`clearedBy = "clearAll"`, delete each lock doc | `{ cleared: n }` |
 
 Precondition failures → 409 `{ error: "invalid_transition", status, cleared }` (never silently succeed — v1 did) **[v1 gap fixed]**. Unknown id → 404.
+
+**Why `unclear` is not a flag flip** **[v1 gap fixed]**: `clear` deletes `activeNumbers/{orderNumber}` in the same transaction that sets `cleared = true`, so undo has to *re-acquire* that lock. If the number went active again in the meantime the undo genuinely cannot succeed — that returns 409 `{ error: "duplicate_order", order: {...the active one} }`, the same shape `add` uses. The `clearedBy == "staff"` guard means a purge or a `clearAll` can never be unpicked one row at a time, and the 60 s server window is deliberately longer than the console's 10 s affordance (§22.2) so the UI never offers an undo the server will refuse. Two concurrent `unclear`s on the same order resolve the same way: the lock doc id is the number, so exactly one wins.
+
+`unclear` is **not** entitlement-gated (§15) and **not** rate-limited (§14.1).
 
 ### 13.1 Stale purge **[v1 gap fixed]**
 
@@ -482,6 +499,7 @@ Precondition failures → 409 `{ error: "invalid_transition", status, cleared }`
 - **Cron:** `GET /api/cron/purge-stale` runs a **collection-group** query `orders where cleared == false and createdAt < cutoff`, groups by parent shop, calls `purgeShop` per shop. Scheduled in `vercel.ts` `crons: [{ path: "/api/cron/purge-stale", schedule: "*/30 * * * *" }]`. Vercel invokes crons with **GET** and sends `Authorization: Bearer <CRON_SECRET>`; the handler rejects anything else. (Plan draft said POST — corrected here.)
 - **Opportunistic:** `add` also calls `purgeShop` for its own shop after the transaction commits. This means a shop that is in use cleans itself up even if the Vercel plan limits cron frequency (Hobby allows only daily crons — Part I). The display never triggers it (the display cannot write).
 - **`preparing` orders never auto-clear on the display**; only this purge touches them (v1 invariant).
+- The purge sets `clearedBy = "purge"`, so purged orders are **never undoable** — `unclear` only accepts `clearedBy == "staff"` (§13). Same for `clearAll`.
 
 ## 14. Validation & errors **[v1 gap fixed]**
 
@@ -490,6 +508,20 @@ Precondition failures → 409 `{ error: "invalid_transition", status, cleared }`
 - Doc ids validated with `DocId` above; slugs with the slug regex (§5).
 - Error codes are stable strings the client maps to copy (§23). HTTP status by class: 400 validation, 401 unauthenticated, 402 unentitled, 403 wrong owner, 404 missing, 409 conflict, 429 rate-limited, 500 unexpected (logged with a request id), 503 feature disabled.
 - No stack traces or Firestore error messages in responses.
+
+### 14.1 Rate limiting the orders route **[v1 gap fixed]**
+
+v1 had no limit on `/api/orders` at all. v2's staff cookie (§7.2) already closes the "bored teenager finds the URL" case — a write needs a valid `cc_staff` cookie for that shop — so what remains is a shared tablet whose 12-hour cookie leaks, a stuck client retry loop, or a mis-scripted test. `clearAll` is the one that hurts.
+
+Reuses the `pinAttempts` mechanism rather than inventing a second one:
+
+- Doc `shops/{shopId}/private/rateLimits`, server-only, keyed by `sha256(ip)` (`x-forwarded-for` first hop, or `x-real-ip`), pruned of entries older than 15 min on every write so the document stays bounded — same discipline as §9's `pinAttempts`.
+- **`add`: 60/min** per shop per IP. Folded into the existing `activeNumbers` transaction, so it costs no extra round trip.
+- **`clearAll`: 5/min** per shop per IP. Its own check — it is the destructive one.
+- **`markReady`, `recall`, `clear`, `unclear`: not limited.** Each acts on one existing order, so they are already bounded by the size of the active list. Adding a Firestore round trip to each would tax the < 1.5 s sync target (§11) to guard nothing.
+- Over the limit → `429 { error: "rate_limited", retryAfterSeconds }`.
+
+In-memory counters are not enough on Fluid Compute — instances come and go — which is why this is a Firestore document, exactly as for the PIN.
 
 ## 15. Entitlement check
 
@@ -506,7 +538,7 @@ if (b.status == "past_due"
 else                                      → throw ApiError(402, "subscription_required", { status: b.status })
 ```
 
-- Applied to **`add` only**. Staff can always mark ready / recall / clear existing orders and the display is always public, so a lapsed shop degrades gracefully mid-service instead of bricking the board.
+- Applied to **`add` only**. Staff can always mark ready / recall / clear existing orders and the display is always public, so a lapsed shop degrades gracefully mid-service instead of bricking the board. `unclear` is covered by that same principle — it restores an order that already existed rather than creating one, so it is never gated.
 - Pure function over `(flags, shop, billing, now)` → unit-tested in Vitest with no network.
 
 ---
@@ -599,7 +631,7 @@ else                                      → throw ApiError(402, "subscription_
 - **No shadows, no gradients, no borders** on state surfaces. Depth = canvas → canvas-elevated → keypad tonal steps.
 - **Focus:** `outline-none focus:ring-2 focus:ring-white/20`.
 - **Disabled:** `disabled:opacity-40` (primary), `disabled:opacity-50` (row buttons), `disabled:opacity-30` (Clear All).
-- **Key heights:** 40 px (`h-10` Clear All), 48 (`h-12` row buttons), 56 (`h-14` primary), 64 (`h-16` keys, PIN input, home links), 80 (`h-20` order field), 112 (`h-28` order field ≥ lg).
+- **Key heights:** 44 px (`h-11` Clear All and the shed nudge — **[v2 change]**, v1's `h-10` was under the 44 px touch-target minimum; §22.2/§24 are authoritative), 48 (`h-12` row buttons), 56 (`h-14` primary), 64 (`h-16` keys, PIN input, home links), 80 (`h-20` order field), 112 (`h-28` order field ≥ lg).
 - **Breakpoints:** Tailwind defaults only — `sm` 640, `md` 768, `lg` 1024, `xl` 1280.
 - **Animation:** framer-motion only; no custom CSS keyframes. Spec in §22.1.
 - **Theme:** `<html lang="en" className="dark">` hardcoded; `NextUIProvider` with no props wraps `{children}` in `app/layout.tsx`. NextUI components used: `Alert` (`color="danger"`, `isClosable`), `Button` (`color="primary"`, `color="danger"`, `variant="light"`, `isLoading`, `isDisabled`), `Modal`/`ModalContent`/`ModalHeader`/`ModalBody`/`ModalFooter`, `Spinner` (`label`). All at stock NextUI dark-theme values — do not restyle them.
@@ -617,6 +649,8 @@ else                                      → throw ApiError(402, "subscription_
 
 **Do:** keep state color full-bleed; pair every state color with its label; use extra width on desktop/iPad to show more of the queue, not to centre a narrow column; size touch targets for busy, imprecise hands (44 px+).
 **Don't:** drop shadows, gradients, glassmorphism; soft-pastel SaaS palette or cutesy iconography; color alone for state; side-stripe/border-left status accents.
+
+**The No-Third-Colour Rule** **[v2 change]**. Time pressure — how long a ticket has been waiting (§22.2) — is expressed as weight and opacity *within* the row's own state colour, never as a new hue. The row's fill is already carrying the state at full bleed; a third colour would break the Full-Bleed Rule and cost more legibility across a counter than the escalation buys. Where extra separation is needed, use the `bg-black/[0.14]` pill the Clear button already uses.
 
 **Creative north star:** "The Diner Order Board" — a physical order board bolted to the wall, not a SaaS admin panel on a tablet.
 
@@ -663,6 +697,8 @@ else                                      → throw ApiError(402, "subscription_
 - Chime: `OscillatorNode` sine **880 Hz**, gain `0.0001 → 0.3` over 20 ms (`exponentialRampToValueAtTime`), `→ 0.0001` at 0.5 s, `osc.stop(+0.5 s)`. Errors swallowed (autoplay policy).
 - **Seeding:** the set of "already-seen ready ids" is seeded from the first snapshot after `status === "connected"`, never from the initial empty render — so pre-existing ready orders don't chime on page load. Thereafter chime once per newly-ready id.
 - iOS/Chrome autoplay: a first user gesture is needed; the kiosk doc (§30) says "tap the screen once after opening". Add a small muted-gray "Tap to enable sound" hint at the footer position until the first gesture when sound is enabled and the context is `suspended` **[v2 change]**.
+- **The first gesture must call `ctx.resume()`** **[v2 change]**. A context created before any gesture starts `suspended`, and it does *not* leave that state merely because an oscillator is constructed and started — `osc.start()` returns normally, nothing plays, and the `catch` swallows it. That is the actual mechanism by which a TV that was switched on and left alone stays silent all service, with no error anywhere. Attach a one-shot `pointerdown`/`keydown` handler that awaits `ctx.resume()` and then hides the hint.
+- **No order age on the display** (§22.2 adds it to the staff console only). The customer-facing board shows numbers, not how late they are.
 
 **Layout (exact v1 classes)**
 
@@ -753,6 +789,10 @@ Errors: `invalid_pin` → "Wrong PIN"; `pin_locked` → "Too many attempts — t
     <div class="flex items-center gap-6">
       <a href="/{slug}/display" class="font-display text-xs font-extrabold uppercase tracking-wider text-muted-gray whitespace-nowrap">Display →</a>
       <button class="(same classes)">Change PIN</button>
+      <div class="flex items-center gap-2">                                          [v1 gap fixed]
+        <span class="w-2.5 h-2.5 rounded-full {connected ? 'bg-ready' : 'bg-preparing'}"/>
+        <span class="font-display text-xs font-extrabold uppercase tracking-wider text-muted-gray whitespace-nowrap">{connected ? 'Live' : 'Reconnecting'}</span>
+      </div>
     </div>
   </header>
   {error && <Alert color="danger" title={error} isClosable onClose/>}
@@ -773,6 +813,7 @@ Errors: `invalid_pin` → "Wrong PIN"; `pin_locked` → "Too many attempts — t
         <h2 class="font-display text-sm font-extrabold uppercase tracking-wider text-muted-gray lg:text-base">Active Orders</h2>
         <div class="flex items-center gap-4">
           <span class="font-display text-xs font-extrabold uppercase tracking-wider text-muted-gray lg:text-sm">{loading ? "" : `${orders.length} in queue`}</span>
+          {shedCount > 0 && <button class="h-11 px-4 rounded-xl bg-white/5 text-muted-gray font-display text-xs font-extrabold uppercase tracking-wider">{shedCount} ready over {m} min — clear?</button>}   [v2 change]
           <button disabled={orders.length===0}
             class="h-11 px-4 rounded-xl bg-white/5 text-muted-gray font-display text-xs font-extrabold uppercase tracking-wider disabled:opacity-30">Clear All</button>   [v2: h-11 (44px) was h-10]
         </div>
@@ -790,7 +831,15 @@ Errors: `invalid_pin` → "Wrong PIN"; `pin_locked` → "Too many attempts — t
 
 - **Valid length:** `n.length >= ticketMinDigits && n.length <= ticketMaxDigits` (v1: `length === 4`). The field and keypad cap input at `ticketMaxDigits` **[v2 change]**.
 - **Add flow:** no client-side duplicate pre-check **[v1 gap fixed]** — call `add`; on 409 `duplicate_order` open the duplicate modal with the returned existing order; on 402 open the subscription modal; on success clear the field. Errors → `Alert` with the mapped copy (§23).
-- **Staff console never applies the ready-timeout filter** — ready orders stay until cleared (v1 invariant).
+- **Staff console never applies the ready-timeout filter** — ready orders stay until cleared (v1 invariant). The shed nudge below *surfaces* the stale ones; it never hides them.
+
+**Connection state** **[v1 gap fixed]**: the console renders the same dot and word as the display, from the same `status` (§11). v1 destructured `{ orders, loading }` and dropped it. This is the nastiest failure mode in the product: writes go over HTTP to a Route Handler, so a tablet whose Firestore listener has gone stale keeps returning clean 200s and feels completely normal while its board silently diverges from the other tablet's — two people confidently working from different lists. §11's 60-second no-server-snapshot heuristic exists precisely to detect this, and is wasted if the console doesn't render it.
+
+**Order age** **[v2 change]**: every `OrderCard` shows how long the order has been waiting, escalating past `settings.targetPrepSeconds`. Without it an order added at 12:01 is visually identical to one added at 12:20, so a forgotten ticket stays invisible until a customer asks. `createdAt` is already on the order — no schema change. The escalation is weight and opacity inside the row's existing state colour, never a new hue (§20, The No-Third-Colour Rule). Recomputed on the same 2 s tick the display uses (§22.1), so no per-card timers.
+
+**Undo on clear** **[v1 gap fixed]**: v1 put a confirmation modal on `Clear All` — done a few times a service — and left individual `Clear` instant and unrecoverable, which is the one staff fat-finger on a wet tablet a hundred times a service. Since the delete is soft, undo is nearly free. After a successful `clear`, show a NextUI `Alert` in the same slot as the error alert with an **Undo** action, dismissed on the next mutation or after **10 s**, whichever comes first. Undo calls `unclear` (§13). 10 s rather than 5 s for two reasons: greasy hands under pressure, and WCAG 2.2.1 — a purely timed 5-second window to recover a destructive action is thin. A confirmation dialog on `Clear` would be the wrong fix; it adds a tap to the most-repeated action in the service.
+
+**Shed nudge** **[v2 change]**: `{n} ready over {m} min — clear?` beside `{n} in queue`, shown only when `n > 0`, where the threshold is `settings.readyTimeoutSeconds` — so it names exactly the orders that have already dropped off the customer display and that nobody is coming to collect. Tapping it opens the Clear All modal with scoped copy and calls `clearAll` with `{ status: "ready", olderThanSeconds: readyTimeoutSeconds }`. Without this the list only grows: by the end of a service the packer is scrolling past forty stale ready orders to reach the live ones.
 
 **Keypad** (`KEYS = ["1".."9","clear","0","back"]`):
 
@@ -808,9 +857,12 @@ press: back → value.slice(0,-1); clear → ""; digit → (value+key).slice(0, 
 
 ```
 <div class="w-full rounded-2xl px-5 py-4 lg:px-6 lg:py-5 xl:px-8 xl:py-6 flex items-center justify-between gap-4 {ready ? 'bg-ready text-ready-text' : 'bg-preparing text-preparing-text'}">
-  <div class="flex items-center gap-3 lg:gap-4 xl:gap-5 min-w-0">
+  <div class="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3 lg:gap-4 xl:gap-5 min-w-0">   [v2: stacks below sm so the age never has to be hidden]
     <span class="font-display text-3xl lg:text-4xl xl:text-5xl font-black tabular-nums truncate">{orderNumber}</span>
-    <span class="font-display text-xs sm:text-sm lg:text-base xl:text-lg font-extrabold uppercase tracking-wider opacity-70">{ready ? "Ready" : "Preparing"}</span>   [v2: visible at all widths; v1 had hidden sm:inline]
+    <div class="flex items-center gap-2">
+      <span class="font-display text-xs sm:text-sm lg:text-base xl:text-lg font-extrabold uppercase tracking-wider opacity-70">{ready ? "Ready" : "Preparing"}</span>   [v2: visible at all widths; v1 had hidden sm:inline]
+      <span class="font-display text-xs sm:text-sm lg:text-base tabular-nums {overTarget ? 'font-black px-2 py-0.5 rounded-xl bg-black/[0.14]' : 'font-bold opacity-70'}">{age}</span>   [v2 change]
+    </div>
   </div>
   <div class="flex gap-2 lg:gap-3 shrink-0">
     {!ready && <button class="h-12 lg:h-14 xl:h-16 min-w-[44px] px-5 lg:px-5 xl:px-7 rounded-xl bg-ready-text text-white font-display font-extrabold lg:text-lg xl:text-xl disabled:opacity-50">Ready</button>}
@@ -828,6 +880,7 @@ Three padding tiers (base / lg / xl) are deliberate: iPad landscape (1024) and d
 |---|---|---|---|
 | Duplicate | `Order already active` | `Order #{orderNumber} is already active ({status}). Clear it first, or use a different number.` | `Button color="primary"` **OK** |
 | Clear all | `Clear all orders?` | `This will clear all {n} active orders from the board. This can't be undone.` | `Button variant="light"` **Cancel** (disabled while clearing) · `Button color="danger" isLoading` **Clear All** |
+| Shed ready **[v2 change]** | `Clear {n} ready orders?` | `These have already dropped off the customer display. This can't be undone.` | `Button variant="light"` **Cancel** · `Button color="danger" isLoading` **Clear All** |
 | Subscription (flag on) | `Subscription needed` | `This shop's subscription has ended, so new orders can't be added. Existing orders still work. Ask the owner to visit Settings.` | `Button color="primary"` **OK** |
 
 ### 22.3 `/{slug}/qr` — printable QR (port of v1 `app/qr/page.tsx`)
@@ -894,7 +947,7 @@ Exact strings. `{shopName}`, `{n}`, `{orderNumber}`, `{status}`, `{m}`, `{date}`
 |---|---|---|
 | display | `{shopName}` | v1: `Order Board` — **[v2 change]**, see Part I |
 | display | `Staff →` | |
-| display | `Live` / `Reconnecting` | |
+| display, staff | `Live` / `Reconnecting` | same strings on both headers **[v1 gap fixed]** — v1 showed them only on the display |
 | display | `Preparing` | column |
 | display | `Ready · Collect` | column (middle dot U+00B7) |
 | display | `No orders` | per-column empty |
@@ -923,6 +976,9 @@ Dropped from v1: `Order Board` (replaced), `← Home` (→ `← Settings`), `Inv
 | Screen | String |
 |---|---|
 | gate | `Wrong PIN` · `Too many attempts — try again in {m} min` · `Couldn't reach the server` |
+| staff card age | `{m}m` · `{h}h {m}m` (tabular numerals; no unit word) |
+| staff undo | `Cleared #{orderNumber}` · `Undo` · `Undone` · `Couldn't undo — #{orderNumber} is active again` · `Too late to undo` |
+| staff shed | `{n} ready over {m} min — clear?` · `Clear {n} ready orders?` · `These have already dropped off the customer display. This can't be undone.` |
 | display | `Tap to enable sound` · `Keep screen on` · `Screen: on` / `Screen: off` · `Fullscreen` |
 | landing | `{appName}` · `A live ticket-number board for your counter — TV, tablet and phone, in sync.` · `Sign in with Google` · `See a demo board` |
 | login | `Sign in` · `Continue with Google` · `Sign-in failed — try again` |
@@ -930,7 +986,7 @@ Dropped from v1: `Order Board` (replaced), `← Home` (→ `← Settings`), `Inv
 | new/settings | `New shop` · `Shop name` · `URL` · `Available` / `Taken` / `Reserved` · `Ticket numbers` · `Shortest` · `Longest` · `Most shops use 1–4 digits. Pager numbers are usually 1–3.` · `Ready timeout (seconds)` · `How long a ready number stays on the TV.` · `Play a sound when an order is ready` · `Staff PIN` · `Confirm PIN` · `PINs don't match` · `PIN must be 4–8 digits` · `Create shop` · `Save` · `Saved` · `Change PIN` · `Staff who are already unlocked stay unlocked for up to 12 hours.` · `Links` · `Open Display` · `Open Staff` · `Print QR` · `Set up your screens` |
 | billing | `Plan` · `Subscribe to keep adding orders after your trial.` · `Subscribe` · `Trial — ends {date}` · `Add payment method` · `Active — renews {date}` · `Manage billing` · `Payment failed — update your card within {n} days to keep adding orders.` · `Update payment` · `Pilot — free during the pilot. Thanks for testing!` · `Payment problem — ask the owner to update billing.` · `Subscription needed` · `This shop's subscription has ended, so new orders can't be added. Existing orders still work. Ask the owner to visit Settings.` |
 | admin | `Admin` · `Pilot` · `Not allowed` |
-| errors (code → copy) | `invalid_order_number` → `Enter {min}–{max} digits` (or `Enter {min} digits` when equal) · `duplicate_order` → duplicate modal · `invalid_transition` → `That order changed — refresh` · `order_not_found` → `That order was already cleared` · `unauthorized` → gate re-shown · `subscription_required` → subscription modal · `pin_locked` → gate message · `slug_taken` → `Taken` · `slug_reserved` → `Reserved` · `invalid_json`/`invalid_body` → `Something went wrong` · network → `Couldn't reach the server` |
+| errors (code → copy) | `invalid_order_number` → `Enter {min}–{max} digits` (or `Enter {min} digits` when equal) · `duplicate_order` → duplicate modal when it came from `add`, but the inline `Couldn't undo — #{orderNumber} is active again` when it came from `unclear` (same code, two treatments — the client maps by the action it sent) · `invalid_transition` → `That order changed — refresh` · `order_not_found` → `That order was already cleared` · `unauthorized` → gate re-shown · `subscription_required` → subscription modal · `pin_locked` → gate message · `slug_taken` → `Taken` · `slug_reserved` → `Reserved` · `invalid_json`/`invalid_body` → `Something went wrong` · `rate_limited` → `Slow down a moment` · network → `Couldn't reach the server` |
 
 ## 24. Responsive & device matrix
 
@@ -948,6 +1004,8 @@ Dropped from v1: `Order Board` (replaced), `← Home` (→ `← Settings`), `Inv
 - `viewport-fit=cover` in the viewport meta + `env(safe-area-inset-*)` padding on `/{slug}/display` and `/{slug}/staff` (notched phones / home-indicator iPads).
 - `prefers-reduced-motion: reduce` → no spring, no scale; tiles just appear/disappear.
 - `OrderCard` status word visible at all widths (v1 hid it below `sm`, violating the Color-Plus-Label Rule).
+- `OrderCard` left group stacks (`flex-col sm:flex-row`) below `sm` so the order age fits without hiding anything — hiding the age at phone width would repeat exactly the mistake above.
+- Live/Reconnecting indicator on the staff console header, not just the display.
 - Clear All to `h-11` (44 px) — v1's `h-10` was under the touch-target minimum.
 - `aria-live="polite"` on the ready column.
 - Wake Lock API on `/{slug}/display` with a "Keep screen on" toggle; re-acquired on `visibilitychange`.
@@ -961,6 +1019,8 @@ Dropped from v1: `Order Board` (replaced), `← Home` (→ `← Settings`), `Inv
 - Touch targets ≥ 44 px everywhere (`min-w-[44px]` on keys and row buttons; heights listed in §20).
 - Keyboard: PIN and order fields are real `<input>`s, Enter submits; modals are NextUI (focus-trapped, Esc closes).
 - `aria-label`s on keypad keys; `aria-live` on the ready column; `alt` on the QR.
+- Order age escalation is carried by the numeral itself plus weight and opacity — never colour alone, so it satisfies the Color-Plus-Label Rule by construction (§20, The No-Third-Colour Rule).
+- The undo `Alert` is `role="status"`, keyboard-reachable, and never traps focus. Its 10 s window is deliberately longer than the 5 s a first instinct suggests: WCAG 2.2.1 discourages short, purely timed windows for recovering a destructive action, and the next mutation dismisses it anyway.
 - Reduced motion respected (§24).
 - No auto-playing audio without a gesture; sound is opt-in per shop or per URL.
 
@@ -1006,8 +1066,8 @@ NEXT_PUBLIC_DEMO_SLUG=                       # optional; "See a demo board" link
 
 ## 27. Deployment
 
-- **Vercel Git integration:** push to `main` → Production; every PR → Preview; the long-lived `dev` branch → Preview with a stable alias (authorized domain for Google sign-in, §7.1). Vercel project framework preset: Next.js; Node 20 or 24.
-- **`vercel.ts`** (`@vercel/config`): `framework: "nextjs"`, `crons: [{ path: "/api/cron/purge-stale", schedule: "*/30 * * * *" }]`. If the Vercel plan is Hobby, crons are limited to once per day — change the schedule to `0 4 * * *` and rely on the opportunistic purge (§13.1); record the choice in `PROGRESS.md`.
+- **Vercel Git integration:** push to `main` → Production; every PR → Preview; the long-lived `dev` branch → Preview with a stable alias (authorized domain for Google sign-in, §7.1). Vercel project framework preset: Next.js; **Node 22 or later** — `firebase-admin@14` declares `engines: { node: ">=22" }`, so Node 20 breaks at runtime (corrected in Phase 0; an earlier draft said "Node 20 or 24").
+- **`vercel.ts`** (`@vercel/config`): `framework: "nextjs"`, `crons: [{ path: "/api/cron/purge-stale", schedule: "*/30 * * * *" }]`. **Confirmed in Phase 0:** `@vercel/config` is a real Vercel package whose bundled types define `crons: CronJob[]` with `CronJob = { schedule: string; path: string }`; import from the `@vercel/config/v1` subpath — the bare package has no root export. Not `vercel.json`. If the Vercel plan is Hobby, crons are limited to once per day — change the schedule to `0 4 * * *` and rely on the opportunistic purge (§13.1); record the choice in `PROGRESS.md`.
 - **Firestore rules and indexes** are deployed by a GitHub Action, never by an interactive `firebase login`:
 
   ```yaml
@@ -1083,7 +1143,7 @@ Prices are per million tokens as of 2026-06-24; check `/model` for the live list
 
 | Phase | Model | Why | Escape hatch |
 |---|---|---|---|
-| **0** Scaffold | **Sonnet 5** | `create-next-app`, config files, workflows, `.env.local.example`. Well-trodden, and §20/§31 already dictate every value. | Step up to Opus 5 if the NextUI v2 + Tailwind v3 pinning fights back (the `@latest` trap in §3) or the Firebase/Vercel wiring doesn't come up green. |
+| **0** Scaffold | **Opus 5** *(revised after the fact)* | Originally Sonnet 5, on the reasoning that §20/§31 dictate every value. Run on Opus 5 instead, and it earned it: three of the four Phase 0 deviations came from *not* taking the spec's own install instructions at face value — `--src-dir=false` is not a valid `create-next-app@14` flag, `firebase-admin@14` needs Node ≥22, and a module-load env throw would have failed CI. The risk in a scaffold is inherited foundations, not typing volume. | — |
 | **1** Data model, rules, orders API, purge | **Opus 5** | The highest-stakes phase in the build. Firestore transaction semantics for the `activeNumbers` dedupe lock, the security rules that are the *only* thing standing between the public and a write path, batched 500-doc clears, collection-group purge. Every failure here is silent — a racy transaction looks fine until two tablets collide mid-service. | None. Do not run this phase on Sonnet. |
 | **2** Owner auth, shops, PIN | **Opus 5** | Crypto and session handling: scrypt parameters, `timingSafeEqual`, HMAC cookie sign/verify, Firestore-backed rate limiting, fail-closed env parsing. v1's headline defect was an auth check that failed open — this phase exists to not repeat it. | None. |
 | **3** Staff console | **Sonnet 5** for the port, **Opus 5** for `lib/useOrders.ts` | §22.2 gives exact classes, heights and copy — that part is careful transcription and Sonnet does it well and cheaply. The pending-set reducer and the snapshot-metadata status derivation (§11, §12) are genuinely subtle and worth switching up for. | Split the session, or run the whole phase on Opus 5 if switching mid-phase is more friction than it's worth. |
@@ -1164,6 +1224,8 @@ See `.env.local.example`. Client: `NEXT_PUBLIC_FIREBASE_API_KEY/AUTH_DOMAIN/PROJ
 - Every Route Handler: zod-validated body, `apiHandler` wrapper, stable `{ error: code }` responses (chipcheck_v2.md §13–14). Missing server secrets must throw at boot (fail closed).
 - Dedupe is a transaction on `shops/{id}/activeNumbers/{orderNumber}`. State guards: markReady only from preparing, recall only from ready, all require `cleared == false`.
 - No hard deletes. `preparing` orders never auto-clear on the display.
+- `clear` is soft and staff-undoable for 60 s via `unclear`, which must re-acquire the `activeNumbers` lock doc; purge and `clearAll` set a different `clearedBy` and are never undoable.
+- The staff console always shows connection state. A tablet whose listener has gone stale still writes successfully over HTTP, so without the dot it looks healthy while its board diverges.
 - Firestore is the single source of truth; no order state in localStorage/sessionStorage.
 
 ## Agent vs Ian
@@ -1191,7 +1253,7 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 
 ## Phase 0 — Scaffold, projects, pipeline
 
-**Model:** Claude Sonnet 5 — mechanical scaffold against a fully specified config (§28b).
+**Model:** Claude Opus 5 — revised from Sonnet 5; the risk is version traps and inherited foundations, not typing volume (§28b).
 
 **Goal:** an empty but deployable app with the design shell, both Firebase projects wired, and every credential in place so no later phase blocks on setup.
 
@@ -1219,11 +1281,11 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 **Goal:** the complete write path for orders on a hardcoded test shop, provably locked down.
 
 **Tasks**
-1. `lib/types.ts` (Shop, Settings, Order, Billing); `lib/server/shops.ts` (`getShopBySlug`, `getShop`), `lib/server/orders.ts` (`addOrder` transaction with `activeNumbers`, `markReady`, `recall`, `clear`, `clearAll`), `lib/server/purge.ts` (`STALE_HOURS = 6`, `purgeShop`, `purgeAll`).
+1. `lib/types.ts` (Shop, Settings, Order, Billing); `lib/server/shops.ts` (`getShopBySlug`, `getShop`), `lib/server/orders.ts` (`addOrder` transaction with `activeNumbers`, `markReady`, `recall`, `clear`, `unclear` re-acquiring the lock doc, `clearAll` with the optional `status`/`olderThanSeconds` filters), `lib/server/purge.ts` (`STALE_HOURS = 6`, `purgeShop`, `purgeAll`), `lib/server/rateLimit.ts` (§14.1, `add` and `clearAll` only).
 2. `app/api/shops/[shopId]/orders/route.ts` per §13 — temporarily authorised by a `X-Dev-Staff-Token` header equal to `STAFF_SESSION_SECRET` in non-production, to be replaced by the cookie in Phase 2 (note it in `PROGRESS.md` deviations and remove it in Phase 2).
 3. `app/api/cron/purge-stale/route.ts` (GET, bearer check).
 4. `firestore.rules` per §10; `firestore.indexes.json` per §9; rules tests in `tests/rules/`.
-5. Vitest: schemas, `orderNumber` per settings, transitions, purge cutoff, in-memory Admin stub for the route.
+5. Vitest: schemas, `orderNumber` per settings, transitions, the `unclear` guards (window, `clearedBy`, lock re-acquisition), `clearAll` filter predicates, rate-limit window logic, purge cutoff, in-memory Admin stub for the route.
 6. `scripts/seed-shop.mjs` (creates `test-shop` in `chipcheck-dev` with settings 1–4 / 300 / PIN hash placeholder) and `scripts/orders-smoke.sh` (curl sequence against a base URL: add → 200, add same → 409, markReady → 200, recall → 200, markReady → 200, recall on preparing → 409, clear → 200, clear again → 409, malformed JSON → 400, bad number → 400, no auth → 401).
 
 **Definition of Done**
@@ -1233,6 +1295,12 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 - [ ] Two concurrent `add` requests for the same number → exactly one 200 and one 409 (script fires them with `&`).
 - [ ] Firestore console shows the composite indexes as **Enabled** for `chipcheck-dev`. **(Ian)**
 - [ ] Cron route returns 401 without the bearer, 200 with it, and clears a seeded order whose `createdAt` was set 7 h in the past by the seed script.
+- [ ] `clear` then `unclear` restores the order **and** re-creates `activeNumbers/{orderNumber}`; an order cleared while `ready` comes back `ready`, not `preparing`.
+- [ ] `unclear` after the same number has been re-added → 409 `duplicate_order` carrying the active order; the re-added order is untouched.
+- [ ] `unclear` on an order cleared by the purge or by `clearAll` → 409 `invalid_transition`.
+- [ ] `unclear` more than 60 s after the clear → 409 `invalid_transition`, and the lock doc is left free.
+- [ ] `clearAll` with `{ status: "ready", olderThanSeconds: N }` clears only matching orders and leaves preparing orders and newer ready orders active.
+- [ ] 61st `add` within a minute from one IP → 429 `rate_limited` with `retryAfterSeconds`; 6th `clearAll` → 429; `markReady`/`recall`/`clear`/`unclear` are never rate-limited.
 - [ ] No `NEXT_PUBLIC_` variable contains a secret (grep in CI).
 
 ## Phase 2 — Owner auth, shops, PIN
@@ -1266,7 +1334,7 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 **Goal:** the v1 staff console, pixel-identical, running on `/{slug}/staff` with per-shop digit rules and a real pending overlay.
 
 **Tasks**
-1. Port `Keypad`, `OrderCard`, the console page and the PIN gate per §22.2 (server-side unlocked check, inline gate errors, `h-11` Clear All, status word at all widths).
+1. Port `Keypad`, `OrderCard`, the console page and the PIN gate per §22.2 (server-side unlocked check, inline gate errors, `h-11` Clear All, status word at all widths, the Live/Reconnecting indicator on the header, the order-age element with target escalation, the undo affordance after `clear`, and the shed nudge).
 2. `lib/useOrders.ts` per §11 with the pending overlay per §12; `lib/api.ts` client helpers mapping error codes to copy (§23).
 3. Duplicate / clear-all / subscription modals (subscription modal wired but unreachable while the flag is off).
 4. `prefers-reduced-motion` and safe-area handling on the console.
@@ -1278,7 +1346,10 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 - [ ] Add on tablet A → card appears on tablet B within 1.5 s (Ian, two devices or two browsers on the `dev` alias; measured by eye against the display clock). **(Ian)**
 - [ ] Double-tapping Ready fires exactly one request (Playwright counts network calls).
 - [ ] Wrong PIN shows "Wrong PIN" inline without leaving the gate; correct PIN shows the console without reload flicker.
-- [ ] Kill the network on the tablet for 30 s: header still renders, buttons produce "Couldn't reach the server", state reconciles when back online. **(Ian)**
+- [ ] Kill the network on the tablet for 30 s: the header dot flips to amber "Reconnecting" (this is the whole point — writes would still succeed over HTTP, so without the dot the tablet looks healthy while its list goes stale), buttons produce "Couldn't reach the server", state reconciles when back online. **(Ian)**
+- [ ] With `targetPrepSeconds` set low on `test-shop`, a card's age crosses the threshold and switches to the heavier pill treatment, with no colour change to the row.
+- [ ] `Clear` shows the undo alert; Undo within 10 s restores the card; the alert dismisses on the next mutation; undoing a number that has been re-added shows "Couldn't undo — #{orderNumber} is active again".
+- [ ] The shed nudge appears only when ready orders exceed `readyTimeoutSeconds`, its count matches, and clearing it leaves preparing orders untouched.
 - [ ] Layout matches v1 at 390, 768, 1024, 1280 widths (Ian compares against the v1 site side by side; agent provides Playwright screenshots at those widths as PR artefacts). **(Ian)**
 - [ ] Playwright smoke green in CI against the `dev` alias.
 
@@ -1293,12 +1364,13 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 2. Port `/{slug}/qr` per §22.3 with `NEXT_PUBLIC_SITE_URL`.
 3. `app/manifest.ts` + icons; `viewport` export with `viewportFit: "cover"`.
 4. Vitest for the ready-timeout filter and chime-seeding logic (pure functions extracted from the page).
-5. Playwright: display shows a seeded preparing tile; marking ready via API moves it to the Ready column (same `layoutId` element); after `readyTimeoutSeconds` (set to 5 on `test-shop` for the test) it disappears from the display but not from the staff list.
+5. Playwright: display shows a seeded preparing tile; marking ready via API moves it to the Ready column (same `layoutId` element); after `readyTimeoutSeconds` it disappears from the display but not from the staff list. **Use the §9 minimum of 30 s on `test-shop`** — an earlier draft said "set to 5 for the test", which §9 rejects as out of range (30–3600). Do not loosen a production constraint to speed up a test; if 30 s makes the suite too slow, extract the filter as a pure function and unit-test the boundary there (task 4 already does).
 
 **Definition of Done**
 - [ ] TV at 1920×1080: two columns, tiles ≥ 190 px, header at `md:` sizes, no scrollbars with 12 tiles per column. **(Ian)**
 - [ ] Phone 390×844 via the printed QR: stacked columns, both headers visible, footer copy when empty. **(Ian)**
 - [ ] `?sound=1`: chime plays once per newly-ready number after one tap; no chime for numbers already ready at load. **(Ian)**
+- [ ] A display left open and untouched from load, then tapped once, chimes on the next ready order — proving `ctx.resume()` runs on the gesture; the "Tap to enable sound" hint disappears at that point. **(Ian)**
 - [ ] Wake Lock keeps the TV/tablet awake ≥ 15 min with the toggle on (device with screen timeout set to 2 min). **(Ian)**
 - [ ] Setting `readyTimeoutSeconds` in `/app/{slug}` changes how long ready tiles stay, with no deploy.
 - [ ] `/{slug}/qr` encodes `https://<NEXT_PUBLIC_SITE_URL>/{slug}/display` (the text under the QR shows it); printed page is white with only the card. **(Ian prints)**
@@ -1391,4 +1463,7 @@ One phase per session. Each phase lists the **Model** to run that session on (re
 | 10 | **Firestore Timestamp skew** for the ready timeout: display uses the device clock vs. server `readyAt`. A TV whose clock is minutes off will show ready tiles too long/short. | Accept; kiosk doc says "set the TV clock to automatic" | — |
 | 11 | **Shop deletion / slug rename** — no UI. | Superadmin does it in the console | Later |
 | 12 | **Rate limiting the slug-availability and unlock endpoints beyond per-IP** (shared NAT at a shop = one IP). 5/15 min per IP+shop could lock out a whole shop if one tablet mistypes. | Keep 5/15 min; owner can wait or rotate the PIN (rotation resets attempts) | Phase 2 |
-| 13 | **Sound autoplay.** Chrome/iOS require a gesture; a rebooted TV device won't chime until touched. | "Tap to enable sound" hint | Phase 4 |
+| 13 | **Sound autoplay.** Chrome/iOS require a gesture; a rebooted TV device won't chime until touched. Separately: should the TV chime *at all*? A chippy at full service is loud enough that the board may be doing all the work, and a silent TV is a defensible default rather than something to discover on pilot day. | "Tap to enable sound" hint, `ctx.resume()` on the gesture, sound on per `?sound=1` or the shop setting | Phase 4 for the mechanism; Phase 7 feedback for whether it's wanted |
+| 14 | **Default `targetPrepSeconds`** for the order-age escalation. 8 min is a guess; a fryer and a grill have different rhythms. | 480 s, per-shop | Phase 7 feedback |
+| 15 | **Undo window** — 10 s in the console, 60 s on the server. Long enough for a wet hand, short enough that the number can't be resurrected after someone else reuses it. | 10 s / 60 s | Phase 7 feedback |
+| 16 | **Order age on the customer display.** Would show customers how late they are — probably worse for everyone than not knowing. | Not shown; staff console only | Phase 7 feedback |
