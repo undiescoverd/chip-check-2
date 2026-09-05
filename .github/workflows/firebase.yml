@@ -1,0 +1,23 @@
+name: Firestore rules & indexes
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - firestore.rules
+      - firestore.indexes.json
+      - .github/workflows/firebase.yml
+
+# PR branches never deploy rules — they run the rules tests instead (test.yml).
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: w9jds/firebase-action@v13
+        with:
+          args: >-
+            deploy --only firestore:rules,firestore:indexes
+            --project ${{ github.ref_name == 'main' && secrets.FIREBASE_PROJECT_PROD || secrets.FIREBASE_PROJECT_DEV }}
+        env:
+          GCP_SA_KEY: ${{ github.ref_name == 'main' && secrets.GCP_SA_KEY_PROD || secrets.GCP_SA_KEY_DEV }}

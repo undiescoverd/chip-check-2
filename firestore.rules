@@ -1,0 +1,11 @@
+rules_version = '2';
+
+// Phase 0 stub: deny everything. The real rules (§10) land in Phase 1.
+// All client writes are denied permanently — the Admin SDK is the only write path.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
