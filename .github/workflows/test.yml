@@ -34,6 +34,11 @@ jobs:
       - name: Firestore rules tests
         run: npx firebase emulators:exec --only firestore --project demo-chipcheck "npm run test:rules"
 
+      # The write path against real Firestore semantics: the dedupe race, lock
+      # re-acquisition on undo, batch chunking, rate-limit windows, purge cutoffs.
+      - name: Orders integration tests
+        run: npx firebase emulators:exec --only firestore --project demo-chipcheck "npm run test:integration"
+
       - name: No secrets in NEXT_PUBLIC_ variables
         run: |
           if grep -rInE 'NEXT_PUBLIC_[A-Z0-9_]*(SECRET|PRIVATE|SERVICE_ACCOUNT|PASSWORD|PIN)[A-Z0-9_]*\s*=\s*\S' \

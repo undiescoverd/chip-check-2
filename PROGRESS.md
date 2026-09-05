@@ -8,14 +8,23 @@ ticked — agent items by the agent, **(Ian)** items by Ian. The agent never tic
 
 ## Current status
 
-**Phase 0 — in progress.** Agent half complete; every credential-dependent item is blocked on
-Ian's infrastructure setup. See `docs/setup-ian.md` for the ordered runbook.
+**Phase 1 — agent side complete.** The whole orders write path is built and, unexpectedly,
+*verified* rather than merely written: the Firestore emulator turns out to run in the sandbox
+(deviation 9), so the security rules and the transaction semantics are proven here rather than
+taken on trust. Two DoD items remain, both needing Ian's Firebase/Vercel setup: the smoke
+script against a real Preview, and the composite indexes showing Enabled in the console.
+
+Phase 0's four credential-dependent items are still open on the same runbook.
 
 | Phase | Model used | State |
 |---|---|---|
 | 0 | Opus 5 | Agent half done; 4 DoD items blocked on Ian |
 | — | Opus 5 | PRD amendment applied (seven review findings + spec/reality reconciliation) |
-| 1–7 | see §28b | Not started — Phase 1 next, with the amended orders API |
+| 1 | Opus 5 | Agent side complete; 220 tests green; 2 DoD items blocked on Ian |
+| 2–7 | see §28b | Not started — Phase 2 next |
+
+**Test counts this session:** 148 unit, 28 rules, 44 emulator integration. Lint, typecheck and
+`next build` clean.
 
 ---
 
@@ -70,6 +79,68 @@ Recorded rather than silently worked around (per CLAUDE.md).
    pinned Next 14.2.35. Not addressed — `npm audit fix --force` would pull Next 16 and break
    NextUI v2 (§3). Revisit at Phase 6.
 
+### Added in Phase 1
+
+9. **§28's "no emulator in the sandbox" is wrong — in our favour.** The whole Phase 1 test
+   strategy was designed around the builder having no emulator, with rules tests marked CI-only.
+   Java 21 and `firebase-tools` are both present and the emulator jar downloads, so the rules
+   suite and a new emulator-backed integration suite both run here. This matters more than it
+   sounds: §10's rules are the only thing between the public internet and the write path, and
+   they are now *proven* in-session rather than deployed on faith. Later phases should assume the
+   emulator is available. Added `npm run test:integration` and a second `emulators:exec` step in
+   CI.
+
+10. **`adminApp()` gained an emulator branch.** Taken only when `FIRESTORE_EMULATOR_HOST` is set,
+    and it throws rather than proceeding if `NODE_ENV` or `VERCEL_ENV` is `production`. The
+    project id comes from `FIREBASE_EMULATOR_PROJECT_ID`, never a credential. With the variable
+    unset the fail-closed path is exactly as before.
+
+11. **`X-Dev-Staff-Token` — a deliberate temporary hole. Phase 2 task 4 must remove it.**
+    Specified by Part H task 2: the orders route is authorised by a header equal to
+    `STAFF_SESSION_SECRET` until the `cc_staff` cookie exists. It is inert whenever
+    `NODE_ENV === "production"`, compared in constant time, and cannot be shop-scoped — which is
+    the point. `tests/unit/auth.test.ts` asserts the production refusal so this cannot rot
+    quietly.
+
+12. **`clearAll` filters in memory rather than in Firestore.** The amendment's
+    `{ status, olderThanSeconds }` filters, expressed as a query, would need a composite index on
+    `(cleared, status, readyAt)` that §9's index table does not declare — and §9's stated
+    principle is that the file declares exactly the queries issued. `clearAll` already reads every
+    uncleared order for the shop, so filtering the result costs nothing and no third index is
+    needed. A gap the amendment itself created; recorded rather than silently indexed around.
+
+13. **Batches chunk at 250 orders, not 500.** §13 says "batched writes of 500", but clearing one
+    order is *two* writes — the order update and its lock delete — so 500 orders would be 1000
+    writes and exceed Firestore's cap. `tests/integration` clears 260 orders to prove the
+    chunking.
+
+14. **Emulator integration tests in place of the in-memory Admin stub.** Part H task 5 asks for an
+    in-memory Admin stub for the route test. The route test instead mocks the service module and
+    asserts the HTTP contract, while the data layer is tested against the real emulator. A stub of
+    Firestore's transaction semantics would only prove the stub agrees with itself, and the dedupe
+    race is precisely what §28b says fails silently.
+
+15. **The rate-limit window counts accepted adds.** The check is folded into the `add`
+    transaction per §14.1, so a rejected request — duplicate or over-limit — aborts the
+    transaction and does not increment the counter. "61st add in a minute → 429" holds exactly as
+    the DoD states; a client spamming duplicates is bounded by the lock rather than the counter.
+
+16. **Timestamps are epoch milliseconds above the Firestore layer.** `lib/server/firestore.ts`
+    converts at the boundary. This keeps the decision logic in `lib/orders/rules.ts` pure and
+    unit-testable, and it fixes the API's wire format, which Phase 3's `upsertLocal` must match.
+    A field written with `serverTimestamp()` reads back null until it resolves, so every consumer
+    handles null.
+
+17. **`config/flags` is cached for 60 s.** §17 promises a flag flip takes effect "within 60 s
+    without a deploy", so the read is cached for exactly that rather than hitting Firestore on
+    every `add`. A failed read falls back to the env var — billing is a commercial gate, and
+    taking every shop offline over one config read would be the worse failure.
+
+18. **Known ceiling: `private/rateLimits` is one document per shop.** Firestore sustains roughly
+    one write per second per document, and §14.1's `add` ceiling is 60/min — right at it. Real
+    shops run nearer 10/min, so this is a documented ceiling rather than a problem. Revisit only
+    if a shop ever approaches the limit; sharding would be overkill at pilot scale.
+
 ---
 
 ## Phase checklists
@@ -97,21 +168,29 @@ were caught by not taking the spec's install instructions at face value.
 
 ### Phase 1 — Data model, rules, orders API, purge
 
-**Model:** Claude Opus 5 — transactions, security rules, purge semantics; failures here are silent (§28b). Do not downgrade.
+**Model:** Claude Opus 5 — transactions, security rules, purge semantics; failures here are silent (§28b). Do not downgrade. Run on Opus 5 as specified.
 
-- [ ] `npm test` green; rules tests green in CI (`firebase emulators:exec`).
-- [ ] Rules tests prove: anonymous can `get` a shop and `list` its orders; **cannot** write any path; **cannot** read `private/*`, `activeNumbers/*`, `users/*`, `config/*`, `stripeEvents/*`; cannot `list` `shops`.
-- [ ] `scripts/orders-smoke.sh https://<preview>` passes every assertion against `chipcheck-dev`.
-- [ ] Two concurrent `add` requests for the same number → exactly one 200 and one 409 (script fires them with `&`).
-- [ ] Firestore console shows the composite indexes as **Enabled** for `chipcheck-dev`. **(Ian)**
-- [ ] Cron route returns 401 without the bearer, 200 with it, and clears a seeded order whose `createdAt` was set 7 h in the past by the seed script.
-- [ ] `clear` then `unclear` restores the order **and** re-creates `activeNumbers/{orderNumber}`; an order cleared while `ready` comes back `ready`, not `preparing`.
-- [ ] `unclear` after the same number has been re-added → 409 `duplicate_order` carrying the active order; the re-added order is untouched.
-- [ ] `unclear` on an order cleared by the purge or by `clearAll` → 409 `invalid_transition`.
-- [ ] `unclear` more than 60 s after the clear → 409 `invalid_transition`, and the lock doc is left free.
-- [ ] `clearAll` with `{ status: "ready", olderThanSeconds: N }` clears only matching orders and leaves preparing orders and newer ready orders active.
-- [ ] 61st `add` within a minute from one IP → 429 `rate_limited` with `retryAfterSeconds`; 6th `clearAll` → 429; `markReady`/`recall`/`clear`/`unclear` are never rate-limited.
-- [ ] No `NEXT_PUBLIC_` variable contains a secret (grep in CI).
+- [x] `npm test` green (148); rules tests green (28) — run **locally as well as in CI**, see deviation 9.
+- [x] Rules tests prove the full §10 matrix, plus that undeclared paths and subcollections are denied. `tests/rules/firestore-rules.test.ts`.
+- [ ] `scripts/orders-smoke.sh https://<preview>` against `chipcheck-dev`. — **blocked:** no Vercel project or Firebase project. All 26 assertions pass against a local server on the emulator; the script targets any base URL unchanged.
+- [x] Two concurrent `add` requests → exactly one 200 and one 409. Proven over HTTP (`&`-fired, locally) **and** at the service layer, including a five-way race.
+- [ ] Firestore console shows the composite indexes as **Enabled** for `chipcheck-dev`. **(Ian)** — **blocked:** no Firebase project. Both indexes are declared in `firestore.indexes.json`; the emulator does not enforce them, so production is the only place this can be confirmed.
+- [x] Cron route returns 401 without the bearer and 200 with it; `purgeShop`/`purgeAll` clear a backdated order and are idempotent. `scripts/seed-shop.mjs --stale` seeds the 7 h order.
+- [x] `clear` → `unclear` restores the order and re-creates the lock; an order cleared while `ready` comes back `ready`.
+- [x] `unclear` after a re-add → 409 `duplicate_order` carrying the active order; the re-added order is untouched.
+- [x] `unclear` on a purge- or `clearAll`-cleared order → 409 `invalid_transition`.
+- [x] `unclear` past 60 s → 409 `invalid_transition` with the lock left free — every guard throws before any write, so there is no partial state to clean up.
+- [x] `clearAll` with `{ status: "ready", olderThanSeconds: N }` sheds only ready orders past the timeout; age measured from `readyAt`, not `createdAt`.
+- [x] 61st `add` from one IP → 429 with `retryAfterSeconds`; 6th `clearAll` → 429; 60 markReady/recall cycles plus clear/unclear are never limited. Limits are per IP, and the two budgets are independent.
+- [x] No `NEXT_PUBLIC_` variable contains a secret (grep passes).
+
+**Also closed this session (beyond the written DoD):**
+- [x] 44 emulator-backed integration tests over the real write path (deviation 9).
+- [x] All 26 assertions in `scripts/orders-smoke.sh` pass end to end over HTTP against a local
+      server on the emulator — including the concurrent-add race and both cron cases.
+- [x] `firestore.rules` replaced the deny-all stub; `passWithNoTests` removed from the rules
+      config (Phase 0 deviation 7 discharged).
+- [x] The Phase 1 dev auth header is proven inert in production by test, not by inspection.
 
 ### Phase 2 — Owner auth, shops, PIN
 

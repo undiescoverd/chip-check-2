@@ -1,11 +1,33 @@
 rules_version = '2';
-
-// Phase 0 stub: deny everything. The real rules (§10) land in Phase 1.
-// All client writes are denied permanently — the Admin SDK is the only write path.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
+
+    // Public shop metadata (name, slug, settings). Never writable from clients.
+    match /shops/{shopId} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if false;
+
+      // The board is public by design (v1 parity).
+      match /orders/{orderId} {
+        allow get, list: if true;
+        allow write: if false;
+      }
+
+      // Everything else under a shop is server-only.
+      match /private/{doc}        { allow read, write: if false; }
+      match /activeNumbers/{num}  { allow read, write: if false; }
     }
+
+    match /slugs/{slug} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // Owners read their own user doc through the server; clients never touch it.
+    match /users/{uid}          { allow read, write: if false; }
+    match /config/{doc}         { allow read, write: if false; }
+    match /stripeEvents/{id}    { allow read, write: if false; }
   }
 }
