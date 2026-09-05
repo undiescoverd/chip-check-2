@@ -17,6 +17,13 @@ jobs:
           node-version: 22
           cache: npm
 
+      # firebase-tools@15 refuses to start the emulator on anything below JDK 21, and the
+      # runner's default JDK is older. Needed by both emulator steps below.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
       - run: npm ci
 
       - name: Lint

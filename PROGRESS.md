@@ -136,7 +136,15 @@ Recorded rather than silently worked around (per CLAUDE.md).
     every `add`. A failed read falls back to the env var — billing is a commercial gate, and
     taking every shop offline over one config read would be the worse failure.
 
-18. **Known ceiling: `private/rateLimits` is one document per shop.** Firestore sustains roughly
+18. **CI needed an explicit JDK 21.** The first run of `test.yml` — the workflow existed
+    since Phase 0 but had never executed, because there was no `main`/`dev` to push to and no
+    PR to open — failed on both emulator steps with "firebase-tools no longer supports Java
+    version before 21". Added `actions/setup-java@v4` (temurin 21). Lint, typecheck, build and
+    all 148 unit tests passed on that same run, so this was the only gap. A reminder that a
+    pipeline nobody has run is not a pipeline: `main` and `dev` now exist and Phase 0's
+    workflow is finally exercised.
+
+19. **Known ceiling: `private/rateLimits` is one document per shop.** Firestore sustains roughly
     one write per second per document, and §14.1's `add` ceiling is 60/min — right at it. Real
     shops run nearer 10/min, so this is a documented ceiling rather than a problem. Revisit only
     if a shop ever approaches the limit; sharding would be overkill at pilot scale.
