@@ -296,6 +296,17 @@ Recorded rather than silently worked around (per CLAUDE.md).
     the board in `beforeEach` would start 429ing at the sixth test, and the failure would look
     like a product bug rather than a test-harness one.
 
+39. **Firestore region is `australia-southeast1`, not `europe-west2`.** §26 and Phase 0's DoD
+    (chipcheck_v2.md:1266) specify `europe-west2` on the stated reasoning that "London keeps
+    latency low for UK shops". The real pilot shops are in New Zealand, not the UK, which makes
+    that reasoning — and the region it picked — wrong for this deployment. There is no GCP region
+    in New Zealand; Sydney (`australia-southeast1`) is the nearest available and the more
+    established of the two Australian options (`australia-southeast2`, Melbourne, is newer).
+    Caught before either Firestore project was created, which is the only time it's fixable — the
+    region is locked in permanently once the database exists. `docs/setup-ian.md` §2 corrected to
+    match; `chipcheck_v2.md` is left as written, per this file's own rule that a wrong plan is
+    recorded here rather than edited into the spec.
+
 ---
 
 ## Phase checklists
