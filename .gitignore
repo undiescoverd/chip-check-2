@@ -8,6 +8,10 @@
 
 # testing
 /coverage
+/test-results
+/playwright-report
+/blob-report
+/.playwright
 
 # next.js
 /.next/
@@ -36,3 +40,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Firestore emulator debug output
+firestore-debug.log
+firebase-debug.log

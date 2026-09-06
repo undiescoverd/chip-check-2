@@ -7,21 +7,32 @@ Work top to bottom — each step unblocks the ones after it. Roughly 45–60 min
 paste them straight into Vercel or GitHub. And every value has exactly one destination; if a
 step doesn't say where a value goes, it isn't finished.
 
-At the end, tell the agent which steps you completed and it will verify the blocked Definition
-of Done items in `PROGRESS.md`.
+At the end, say "setup done" and the agent will work through every blocked Definition of Done
+item in `PROGRESS.md` — nine of them, across Phases 0, 1 and 2. If you had to skip or change a
+step, say which; otherwise it needs nothing else from you.
 
 ---
 
-## 1. Git branches (2 min) — unblocks: the pull request
+## 1. Default branch (1 min) — unblocks: review tooling
 
-The repo currently has one branch, `claude/prd-phases-review-ucglvr`, and no default branch.
+`main` and `dev` both exist now, so most of this step is already done. One thing remains:
 
-1. Create `main` from that branch (GitHub → Branches, or push locally).
-2. Set `main` as the repository's default branch.
-3. Create `dev` from `main`.
+1. **Settings → General → set `main` as the repository's default branch.**
+
+Worth doing because tooling broadly assumes the default branch is the trunk, and this repo's
+trunk is `main` while its day-to-day target is `dev`. CodeRabbit is one instance: it will not
+auto-review a pull request whose base is anything other than the default branch, which is why
+`.coderabbit.yaml` in the repo root names `dev` explicitly.
+
+**That config does not, on its own, get this repo reviewed.** CodeRabbit reads it, then declines
+for a separate reason it does not let you configure: *"this repository does not receive automatic
+reviews because it has fewer than 10 stars."* So until that changes, the way to get a review is
+to comment **`@coderabbitai review`** on the pull request. The config still earns its place — it
+removes the base-branch blocker, so on-demand reviews work and automatic ones would too if the
+star gate ever lifts — but do not expect reviews to start appearing just because it is there.
 
 `dev` is the long-lived staging branch. Feature branches PR into `dev`; `dev` → `main` merges
-are yours alone. Until `main` exists there is nothing for a PR to target.
+are yours alone.
 
 ---
 
@@ -104,6 +115,14 @@ production values:
 - `NEXT_PUBLIC_SITE_URL` (the dev alias)
 - `STAFF_SESSION_SECRET`, `CRON_SECRET` (the dev values)
 - `VERCEL_AUTOMATION_BYPASS_SECRET`, if you enabled it in 3.6
+- `E2E_STAFF_PIN` — **new in Phase 2.** Any 4–8 digit number you pick; it is the staff PIN for
+  the `test-shop` test shop, not a secret protecting anything real. The agent seeds the shop with
+  `node scripts/seed-shop.mjs --slug=test-shop --pin=<that value>`, and
+  `scripts/orders-smoke.sh` exchanges it for a `cc_staff` cookie. Without it the smoke test
+  refuses to run — Phase 2 removed the dev header it used to authenticate with (§7.2).
+- `E2E_BASE_URL` — **new in Phase 3.** The `dev` alias. Setting it points the Playwright suite at
+  the deployed console instead of a local server; leaving it unset runs the same tests here
+  against the emulator, which is what CI does on every pull request.
 
 ---
 
@@ -125,14 +144,53 @@ JSON. This is the one place the base64 form is wrong.
 
 ## 6. Verify (5 min)
 
-Once steps 1–5 are done, tell the agent. It will check:
+Once steps 1–5 are done, **just say "setup done"** — that is the whole handback. Everything below
+is the agent's to run; it needs nothing else from you first.
+
+**Phase 0 — the foundations**
 
 - `curl https://<dev alias>/api/health` → `{"ok":true,"project":"chipcheck-dev"}`
 - `node scripts/admin-ping.mjs` reads `chipcheck-dev` from the sandbox
-- Firebase console → Firestore → Rules shows the deny-all stub on `chipcheck-dev`
-- Vercel → Settings → Cron Jobs lists `/api/cron/purge-stale` *(it will 404 until Phase 1 — the
-  entry existing is what matters here)*
+- Firebase console → Firestore → Rules shows **§10's real rules** on `chipcheck-dev` — public
+  `get` on shops, slugs and orders; everything else denied. (An earlier draft of this runbook said
+  "deny-all stub"; Phase 1 replaced that.)
+- Vercel → Settings → Cron Jobs lists `/api/cron/purge-stale`, and it now **returns 200** with a
+  bearer token rather than 404 — Phase 1 built the route.
 - The landing page renders in Archivo on the dark canvas
+
+**Phase 1 — the orders write path**
+
+- `scripts/orders-smoke.sh <preview-url> test-shop` — 33 assertions covering the dedupe race, the
+  undo window, `clearAll` and the cron. It passes against the local emulator today; this is the
+  same script against a real Preview and a real Firebase project.
+- Firestore → Indexes shows the two composite indexes on `orders` as **Enabled** (they take a few
+  minutes to build after the Action deploys them)
+
+**Phase 2 — owner auth, shops and the PIN**
+
+- Google sign-in completes on the `dev` alias and `/app` shows "No shops yet."
+- Creating `test-shop` through `/app/new` writes `shops/{id}`, `slugs/test-shop`,
+  `private/auth` (a `scrypt$…` hash, no plaintext PIN anywhere), `private/billing`
+  `{ status: "pilot" }` and `users/{uid}.shopIds`
+- A wrong PIN six times in 15 minutes → 429 with `retryAfterSeconds`
+- `Set-Cookie: cc_staff…` carries **`Secure`** on the Preview (it is deliberately off over local
+  HTTP, so this is the one attribute the sandbox cannot prove)
+
+**Phase 3 — the staff console**
+
+- Two tablets (or two browser windows) on `<dev alias>/test-shop/staff`: adding on one puts the
+  card on the other inside 1.5 s, measured against the display clock
+- Kill the tablet's wifi for 30 seconds: the header dot turns amber and says **Reconnecting**,
+  buttons say "Couldn't reach the server", and the list reconciles when it comes back. This is
+  the one that matters — without the dot a stale tablet looks perfectly healthy
+- Side-by-side against the v1 console at 390, 768, 1024 and 1280 px. The agent's screenshots at
+  those widths are attached to the CI run (**playwright-artefacts**) so you can compare without a
+  tablet in hand
+
+**Needs one extra thing from you:** the fail-closed check. Remove `STAFF_SESSION_SECRET` from a
+throwaway Preview environment and tell the agent — every API route must then return 500, not 200.
+That is the v1 defect this whole design exists to prevent, so it is worth proving on real infra
+rather than trusting the unit test.
 
 Yours to eyeball: the Preview deployment is green, and `/` looks right on a phone.
 

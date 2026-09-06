@@ -1,0 +1,30 @@
+# CodeRabbit configuration.
+#
+# Why this file exists: CodeRabbit only auto-reviews pull requests whose base is the
+# repository's default branch. Every feature PR in this project targets `dev`
+# (CLAUDE.md, chipcheck_v2.md §27), so without this the only PR it would ever consider is
+# `dev` → `main` — after the code is already staged for production, which is the wrong end
+# of the pipeline.
+#
+# What this file does NOT do: make reviews happen. CodeRabbit reads this config and then
+# declines anyway, with a reason no config can override — "this repository does not receive
+# automatic reviews because it has fewer than 10 stars". Until that changes, a review is
+# requested by commenting `@coderabbitai review` on the PR. This config is what makes that
+# request work on a `dev`-targeted PR, and what will make automatic reviews work if the
+# star gate ever lifts.
+#
+# Schema: https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+language: en-GB
+
+reviews:
+  # `base_branches` entries are regular expressions, not literal branch names — anchored
+  # here so `dev` cannot also match a branch merely containing "dev".
+  auto_review:
+    enabled: true
+    base_branches:
+      - "^dev$"
+      - "^main$"
+    # Phase PRs are opened as drafts and worked on for a while before being marked ready.
+    # Reviewing them early is the point; waiting until "ready for review" means the
+    # findings arrive after the work is done.
+    drafts: true

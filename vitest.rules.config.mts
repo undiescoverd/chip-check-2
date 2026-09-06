@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
 
 // Rules suite — CI only, runs inside `firebase emulators:exec` (§28).
 export default defineConfig({
@@ -6,7 +7,11 @@ export default defineConfig({
     environment: "node",
     include: ["tests/rules/**/*.test.ts"],
     testTimeout: 20_000,
-    // Phase 1 adds the real suite (§10); until then an empty run must not fail CI.
-    passWithNoTests: true,
+  },
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL(".", import.meta.url)),
+      "server-only": fileURLToPath(new URL("./tests/stubs/server-only.ts", import.meta.url)),
+    },
   },
 });
