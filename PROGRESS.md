@@ -25,10 +25,11 @@ expected to need a second Google account.
 | — | Opus 5 | PRD amendment applied (seven review findings + spec/reality reconciliation) |
 | 1 | Opus 5 | Agent side complete; 220 tests green; 2 DoD items blocked on Ian |
 | 2 | Opus 5 | Agent side complete; 374 tests green; 3 DoD items blocked on Ian |
-| 3–7 | see §28b | Not started — Phase 3 next |
+| 3 | Opus 5 (`lib/useOrders.ts`) | **In progress** — the hook and its pure logic are done; the console port is next, on Sonnet 5 |
+| 4–7 | see §28b | Not started |
 
-**Test counts this session:** 251 unit, 34 rules, 89 emulator integration — 374 total, up from
-220. `scripts/orders-smoke.sh` passes 33/33 end to end over HTTP against a local server on the
+**Test counts:** 293 unit, 34 rules, 89 emulator integration — 416 total, up from 220 at the
+start of Phase 2. `scripts/orders-smoke.sh` passes 33/33 end to end over HTTP against a local server on the
 emulator, now unlocking with a real PIN rather than a dev header. Lint, typecheck and
 `next build` clean.
 
@@ -332,6 +333,27 @@ on Opus 5 as specified; not downgraded.
 ### Phase 3 — Staff console per shop
 
 **Model:** Claude Sonnet 5 for the port; Claude Opus 5 for `lib/useOrders.ts` (pending reducer + status derivation) (§28b).
+
+Split as §28b directs, with the Opus half first because the console is written against the
+hook's interface — building the port first would mean guessing at it and reworking.
+
+**Done (Opus 5):**
+- [x] `lib/orders/connection.ts` — §11's status derivation, pure. Four disconnected
+      conditions including the one that matters: a visible tab with no error, `navigator.onLine`
+      true and cache-sourced snapshots still arriving is *silently stale*, and nothing else in
+      the system notices. 12 tests, including the 60 s boundary and that a backgrounded tab is
+      exempt.
+- [x] `lib/orders/pending.ts` — §12's overlay, pure. Two invariants carry it: the overlay never
+      invents a row (only rows the server returned), and the snapshot always wins in the end
+      (confirmed, or dropped at the 5 s cap). 30 tests, including full add / markReady / recall /
+      clear / undo lifecycles and the refused-undo case §12 flags as "most tempting and most
+      wrong".
+- [x] `lib/useOrders.ts` — the wiring: `onSnapshot` with `includeMetadataChanges`, the
+      online/offline/visibilitychange listeners, and a 1 s tick for the elapsed-time rules.
+
+**Remaining (Sonnet 5):** the §22.2 port — `Keypad`, `OrderCard`, the console page and PIN gate,
+`lib/api.ts` error-code mapping, the modals, reduced-motion and safe-area handling, and the
+Playwright smoke.
 
 - [ ] `test-shop` set to digits 2–5: the Add button enables only for 2–5 digit input; keypad stops at 5; server rejects a 6-digit number with 400 even if forced via curl.
 - [ ] Add on tablet A → card appears on tablet B within 1.5 s (Ian, two devices or two browsers on the `dev` alias; measured by eye against the display clock). **(Ian)**
