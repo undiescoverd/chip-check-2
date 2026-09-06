@@ -8,18 +8,16 @@ ticked — agent items by the agent, **(Ian)** items by Ian. The agent never tic
 
 ## Current status
 
-**Phase 3 — agent side complete.** The staff console is built and running: the PIN gate, the
-keypad, the order list, the pending overlay, the Live/Reconnecting dot, the order age, the undo
-after `clear`, the shed nudge and the four modals.
+**Phase 4 — agent side complete.** The customer board is built and running: the two columns
+sliding a tile between them on one `LayoutGroup`, the ready-timeout drop-off (display-only, per
+CLAUDE.md — `preparing` orders never auto-clear anywhere), the chime with its seed-don't-chime
+rule, the Wake Lock toggle, Fullscreen, reduced motion, safe-area padding, and `/{slug}/qr` with
+a real QR code and the v1 print stylesheet. The PWA manifest and a hand-encoded placeholder icon
+round out §24.
 
-The sandbox surprised us a third time, and this one is the biggest of the three. §28 assumed
-Playwright could only ever run against a deployed Preview. It runs here: Chromium is present,
-`next dev` starts against the emulator, and the client Firestore SDK can be pointed at the
-emulator too (deviations 30–31). So **the console is exercised in a real browser against a real
-`onSnapshot` listener** — 18 end-to-end tests including the two-tablet sync, the double-tap
-guard, the undo, the refused undo and the shed nudge. Five of the ten Phase 3 DoD items are
-ticked from this session; the same suite now runs in CI on every pull request, and will run
-unchanged against the `dev` alias by setting `E2E_BASE_URL`.
+This ran without the Firebase service-account key Ian is still setting up — everything here is
+exercised against the Firestore emulator, the same as Phases 1–3, so the missing key blocked
+nothing. It gates only the live `admin-ping` check and the real-device items below.
 
 | Phase | Model used | State |
 |---|---|---|
@@ -28,10 +26,11 @@ unchanged against the `dev` alias by setting `E2E_BASE_URL`.
 | 1 | Opus 5 | Agent side complete; 220 tests green; 2 DoD items blocked on Ian |
 | 2 | Opus 5 | Agent side complete; 374 tests green; 3 DoD items blocked on Ian |
 | 3 | Opus 5 (both halves — see the phase note) | Agent side complete; 477 tests green; 4 DoD items blocked on Ian |
-| 4–7 | see §28b | Not started |
+| 4 | Sonnet 5, as specified | Agent side complete; 499 tests green; 4 DoD items need real hardware (Ian) |
+| 5–7 | see §28b | Not started |
 
-**Test counts:** 336 unit, 34 rules, 89 emulator integration, 18 Playwright — 477 total, up from
-416 at the start of Phase 3. `scripts/orders-smoke.sh` still passes 33/33 over HTTP against a
+**Test counts:** 348 unit, 34 rules, 89 emulator integration, 28 Playwright — 499 total, up from
+477 at the start of Phase 4. `scripts/orders-smoke.sh` still passes 33/33 over HTTP against a
 local server on the emulator. Lint, typecheck and `next build` clean.
 
 ---
@@ -470,18 +469,84 @@ those calls quick.
 
 ### Phase 4 — Customer display + QR per shop
 
-**Model:** Claude Sonnet 5 — §22.1/§22.3 are near-complete markup (§28b).
+**Model:** Claude Sonnet 5 — §22.1/§22.3 are near-complete markup (§28b). Run as specified; no
+deviation.
+
+**Done — the board (§22.1):**
+- [x] `lib/orders/visible.ts` — the display's own ready-timeout filter, pure and separate from
+      the staff console's shed nudge (`lib/orders/shed.ts`) even though they read the same rule
+      from opposite sides: one hides what the other offers to clear. 5 tests, including that a
+      `preparing` order is never hidden however old, and that an unresolved `readyAt` (a
+      `serverTimestamp()` read back in the same tick, §9) counts as "not yet timed out" rather
+      than "always timed out" — CLAUDE.md's invariant that only display-layer filtering ever
+      hides an order, never a real clear.
+- [x] `components/display/Column.tsx`, `components/display/OrderTile.tsx` — classes verbatim
+      from §22.1. The two columns share one `LayoutGroup` and tiles share `layoutId={order.id}`,
+      so a tile **slides** from Preparing to Ready rather than fading out of one and into the
+      other. `aria-live="polite"` only on the ready column (§25) — the ready side is the one
+      change on this screen worth announcing.
+- [x] `DisplayShell.tsx` rewritten onto `useOrders` — the header dot, the mount-only clock, the
+      empty-board footer, and no order age (§22.2 keeps that on the staff console only).
+
+**Done — sound (§22.1):**
+- [x] `lib/display/chime.ts` — split in two on purpose. `nextSeenReady`/`seedSeenReady` are pure
+      and unit-tested (7 tests, including the seeding rule itself: a shop opening the display
+      mid-service does not chime for every order already on it, and a cleared order's id is
+      dropped from the tracked set rather than carried forever). `Chime` is the unavoidably
+      impure half — one `AudioContext` for the page's lifetime (Chrome caps live contexts at
+      ~6, the v1 bug this keeps fixed), 880 Hz sine, resumed only inside the first
+      `pointerdown`/`keydown` handler — resuming outside a real gesture is the exact mechanism
+      behind a TV that stays silent all service with no error anywhere.
+- [x] `?sound=1` / `?sound=0` override `settings.soundEnabled` in both directions. Proven with a
+      Playwright test that wraps `OscillatorNode.prototype.start` to count real chimes: zero for
+      an order already ready at load, exactly one for a newly-ready order after the gesture, and
+      zero regardless of the gesture when `?sound=0` is forced.
+- [x] The "Tap to enable sound" hint shows until the first gesture and disappears immediately
+      after — asserted in the same test as the chime count.
+
+**Done — Wake Lock, Fullscreen, reduced motion, safe area, PWA (§24):**
+- [x] Wake Lock toggle (`Screen: on/off`), re-acquired on `visibilitychange` and on the
+      sentinel's own `release` event while the toggle is on. Simplification recorded rather than
+      hidden: the toggle click is the qualifying gesture (§22.1 also mentions "on first gesture"
+      for the case where the toggle is already on before any tap) — in practice turning the
+      toggle on *is* the first gesture, so this covers the real path; **(Ian)** proves the
+      ≥ 15-minute hold on real hardware, which no emulator run can do honestly.
+- [x] Fullscreen link, hidden when `document.fullscreenEnabled` is false.
+- [x] `useReducedMotion` (framer-motion, the same convention `StaffModals` already uses) drops
+      the spring and the scale on `OrderTile`; `initial={false}` under reduced motion means a
+      new tile renders straight at its resting state rather than animating in. Playwright emulates
+      `prefers-reduced-motion: reduce` and confirms the tile still renders correctly — the
+      absence of an animation has no stable DOM signal to assert on directly, so this is a
+      structural guarantee (`initial={false}`, `transition: { duration: 0 }`) rather than a
+      timing observation, the same honesty `shed.ts`'s "structural rather than tested-by-example"
+      note already applies elsewhere in this file.
+- [x] Safe-area padding via `pt-[env(safe-area-inset-top)]` etc. directly on `<main>` (§22.1
+      names this exact form, distinct from the staff console's `.safe-pad` utility pair — the
+      display's `<main>` has no baseline padding of its own to replace, so the additive Tailwind
+      arbitrary values apply cleanly where `.safe-pad` would not).
+- [x] `app/manifest.ts` (`name`, `display: "standalone"`, `background_color`/`theme_color:
+      #0d1117`, icons 192/512) and `app/apple-icon.png`. Icons are a flat amber placeholder,
+      hand-encoded as PNG (no image library available in the sandbox — `node:zlib` plus a
+      manual pixel buffer) rather than the real "CC" wordmark; replace both files before the
+      pilot. `next build` confirms `/manifest.webmanifest` and `/apple-icon.png` are generated.
+
+**Done — `/{slug}/qr` (§22.3):**
+- [x] `app/[slug]/qr/page.tsx` — classes verbatim, `QRCode.toDataURL` at 512 px, target URL
+      `NEXT_PUBLIC_SITE_URL ?? window.location.origin` (the v1 gap the spec calls out). Print
+      CSS was already sitting in `globals.css` since Phase 0, unused until now.
+- [x] Download PNG and Print wired to the generated data URL; the download link is disabled
+      (`aria-disabled`, no `href`) until the code resolves rather than pointing at nothing.
 
 - [ ] TV at 1920×1080: two columns, tiles ≥ 190 px, header at `md:` sizes, no scrollbars with 12 tiles per column. **(Ian)**
 - [ ] Phone 390×844 via the printed QR: stacked columns, both headers visible, footer copy when empty. **(Ian)**
-- [ ] `?sound=1`: chime plays once per newly-ready number after one tap; no chime for numbers already ready at load. **(Ian)**
-- [ ] A display left open and untouched from load, then tapped once, chimes on the next ready order — proving `ctx.resume()` runs on the gesture; the "Tap to enable sound" hint disappears at that point. **(Ian)**
+- [x] `?sound=1`: chime plays once per newly-ready number after one tap; no chime for numbers already ready at load. **Proven in the emulator** (the oscillator-count test above); **(Ian)** still confirms it on a real TV speaker, which is the part a counted function call cannot stand in for.
+- [ ] A display left open and untouched from load, then tapped once, chimes on the next ready order — proving `ctx.resume()` runs on the gesture; the "Tap to enable sound" hint disappears at that point. **(Ian)** — the hint's disappearance is asserted in the emulator suite; the real autoplay-policy behaviour needs a real browser build.
 - [ ] Wake Lock keeps the TV/tablet awake ≥ 15 min with the toggle on (device with screen timeout set to 2 min). **(Ian)**
-- [ ] Setting `readyTimeoutSeconds` in `/app/{slug}` changes how long ready tiles stay, with no deploy.
-- [ ] `/{slug}/qr` encodes `https://<NEXT_PUBLIC_SITE_URL>/{slug}/display` (the text under the QR shows it); printed page is white with only the card. **(Ian prints)**
-- [ ] `prefers-reduced-motion` emulated in Playwright → tiles have no transform animation.
+- [x] Setting `readyTimeoutSeconds` in `/app/{slug}` changes how long ready tiles stay, with no deploy — the display reads `settings` from `app/[slug]/layout.tsx`, which is `force-dynamic` and re-fetches the shop on every request, so a saved setting takes effect on the display's next load with nothing to redeploy. Proven end to end: a Playwright test backdates a ready order past the seeded shop's 300 s timeout and the tile drops off within the next second-tick.
+- [x] `/{slug}/qr` encodes `https://<NEXT_PUBLIC_SITE_URL>/{slug}/display` (the text under the QR shows it) — asserted by Playwright. Printed page is white with only the card: the print CSS is verbatim from v1 and unit-testable only by eye, so **(Ian prints)** still confirms the physical page.
+- [x] `prefers-reduced-motion` emulated in Playwright → tiles have no transform animation — see the structural note above.
 - [ ] Manifest validates (Lighthouse PWA "installable" check on the `dev` alias). **(Ian)**
-- [ ] Playwright display tests green.
+- [x] Playwright display tests green — 10 new tests across `display.spec.ts` and `qr.spec.ts`, plus all 18 existing Phase 3 tests still green (28 total, §28's "Playwright smoke green in CI" now covers two screens).
 
 ### Phase 5 — Billing behind the flag
 
