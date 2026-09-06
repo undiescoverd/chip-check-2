@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
+import { getAuth, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
 
 /**
@@ -19,4 +20,16 @@ export function clientApp(): FirebaseApp {
 
 export function db(): Firestore {
   return getFirestore(clientApp());
+}
+
+/**
+ * Firebase Auth, used for exactly one thing: obtaining a Google ID token to exchange for
+ * the `cc_session` cookie (§7.1 steps 1–2).
+ *
+ * This does NOT weaken the invariant above. The client signs out immediately after the
+ * exchange (§7.1 step 5), so Firestore reads stay anonymous and `firestore.rules` still
+ * never references `request.auth`. The cookie is the session; the SDK is a token source.
+ */
+export function auth(): Auth {
+  return getAuth(clientApp());
 }

@@ -13,7 +13,7 @@
     "test:rules": "vitest run --config vitest.rules.config.mts",
     "test:e2e": "playwright test",
     "test:integration": "vitest run --config vitest.integration.config.mts",
-    "emulate": "firebase emulators:exec --only firestore --project demo-chipcheck"
+    "emulate": "firebase emulators:exec --only firestore,auth --project demo-chipcheck"
   },
   "dependencies": {
     "@nextui-org/react": "^2.6.11",

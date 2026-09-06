@@ -8,16 +8,29 @@
  *
  * Options:
  *   --slug=<slug>        shop slug and document id      (default: test-shop)
+ *   --pin=<digits>       staff PIN, 4-8 digits           (default: 4321)
  *   --min=<n> --max=<n>  ticket digit range             (default: 1 and 4)
  *   --stale              also seed an order whose createdAt is 7 h in the past, for the
  *                        cron purge check in Phase 1's Definition of Done
  *   --reset              delete the shop's existing orders and locks first
  *
- * Writes nothing outside the named shop. The PIN is a placeholder: real scrypt hashing
- * is Phase 2 (`lib/server/pin.ts`), and this value will not verify against anything.
+ * Writes nothing outside the named shop. The PIN is hashed with the same scrypt
+ * parameters as `lib/server/pin.ts` (§7.2), so the seeded shop really does unlock.
  */
+import { randomBytes, scrypt as scryptCb } from "node:crypto";
+import { promisify } from "node:util";
 import { cert, initializeApp } from "firebase-admin/app";
 import { FieldValue, Timestamp, getFirestore } from "firebase-admin/firestore";
+
+const scrypt = promisify(scryptCb);
+
+/** Mirrors lib/server/pin.ts — scrypt$N$salt$hash, N=2^15, r=8, p=1, 64 bytes. */
+async function hashPin(pin) {
+  const salt = randomBytes(16);
+  // 128 * N * r is exactly Node's default maxmem at these parameters, so raise it.
+  const hash = await scrypt(pin, salt, 64, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  return `scrypt$32768$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
 
 const args = new Map(
   process.argv.slice(2).map((a) => {
@@ -29,7 +42,13 @@ const args = new Map(
 const slug = String(args.get("slug") ?? "test-shop");
 const min = Number(args.get("min") ?? 1);
 const max = Number(args.get("max") ?? 4);
+const pin = String(args.get("pin") ?? "4321");
 const seedStale = args.has("stale");
+
+if (!/^\d{4,8}$/.test(pin)) {
+  console.error("--pin must be 4-8 digits");
+  process.exit(1);
+}
 const reset = args.has("reset");
 
 if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 6 || max < min) {
@@ -104,11 +123,13 @@ await shopRef.set(
 
 await db.collection("slugs").doc(slug).set({ shopId: slug });
 
-// Phase 2 replaces this with a real scrypt hash. It is deliberately not a valid hash.
 await shopRef.collection("private").doc("auth").set({
-  pinHash: "scrypt$PLACEHOLDER$PLACEHOLDER$PLACEHOLDER",
+  pinHash: await hashPin(pin),
   pinUpdatedAt: FieldValue.serverTimestamp(),
 });
+
+// Start from a clean lockout state so a re-seed is never born rate-limited (§7.2).
+await shopRef.collection("private").doc("pinAttempts").set({ attempts: {} });
 
 await shopRef.collection("private").doc("billing").set({
   status: "pilot",

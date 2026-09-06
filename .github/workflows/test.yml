@@ -43,8 +43,10 @@ jobs:
 
       # The write path against real Firestore semantics: the dedupe race, lock
       # re-acquisition on undo, batch chunking, rate-limit windows, purge cutoffs.
-      - name: Orders integration tests
-        run: npx firebase emulators:exec --only firestore --project demo-chipcheck "npm run test:integration"
+      # Phase 2 added the Auth emulator: it implements createSessionCookie, so the owner
+      # sign-in flow is exercised for real rather than mocked.
+      - name: Integration tests (write path, shops, sessions)
+        run: npx firebase emulators:exec --only firestore,auth --project demo-chipcheck "npm run test:integration"
 
       - name: No secrets in NEXT_PUBLIC_ variables
         run: |

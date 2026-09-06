@@ -16,8 +16,8 @@ interface Context {
  * The orders write path (§13). Every action for a shop goes through this one endpoint,
  * discriminated by `action`, because the staff console only ever needs one fetch helper.
  *
- * Auth is the Phase 1 dev header for now — see `lib/server/auth.ts`. Phase 2 replaces it
- * with the `cc_staff` cookie and nothing else here changes.
+ * Auth is the `cc_staff` cookie for this shop (§7.2 step 6). Phase 1's `X-Dev-Staff-Token`
+ * header is gone — see `lib/server/auth.ts`.
  */
 export const POST = apiHandler<Context>(async (req, { params }) => {
   const { shopId } = params;

@@ -41,6 +41,33 @@ export function clientIp(req: Request): string {
   return req.headers.get("x-real-ip")?.trim() || "unknown";
 }
 
+/**
+ * Read one cookie from a request.
+ *
+ * Parsed from the header rather than `next/headers` so the auth helpers take a plain
+ * `Request` and stay unit-testable outside a Next server context. Only the first
+ * occurrence of a name is honoured — a second one is how a cookie-injection attempt
+ * would try to shadow the real value.
+ */
+export function readCookie(req: Request, name: string): string | undefined {
+  const header = req.headers.get("cookie");
+  if (!header) return undefined;
+
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+
+    const raw = part.slice(eq + 1).trim();
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return undefined;
+}
+
 /** Rate-limit keys are hashed so raw IPs are never stored (§14.1, same as `pinAttempts`). */
 export function hashIp(ip: string): string {
   return createHash("sha256").update(ip).digest("hex");

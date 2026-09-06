@@ -5,11 +5,11 @@
 #   scripts/orders-smoke.sh <baseUrl> [shopId]
 #
 # Requires:
-#   STAFF_SESSION_SECRET  the dev staff token (Phase 1 auth; Phase 2 swaps in a cookie)
+#   E2E_STAFF_PIN         the shop's staff PIN — exchanged for a cc_staff cookie (§7.2)
 #   CRON_SECRET           optional — if set, the cron route is exercised too
 #
-# The shop must exist. Seed it first:
-#   node scripts/seed-shop.mjs --slug=test-shop
+# The shop must exist and have that PIN set. Seed it first:
+#   node scripts/seed-shop.mjs --slug=test-shop --pin=4321
 #
 # Works against any base URL: a Vercel Preview, or a locally served build running against
 # the emulator. Every assertion prints PASS or FAIL and the script exits non-zero if any
@@ -24,13 +24,16 @@ if [[ -z "$BASE_URL" ]]; then
   echo "usage: $0 <baseUrl> [shopId]" >&2
   exit 64
 fi
-if [[ -z "${STAFF_SESSION_SECRET:-}" ]]; then
-  echo "STAFF_SESSION_SECRET must be set" >&2
+if [[ -z "${E2E_STAFF_PIN:-}" ]]; then
+  echo "E2E_STAFF_PIN must be set (the shop's staff PIN)" >&2
   exit 64
 fi
 
 BASE_URL="${BASE_URL%/}"
 ENDPOINT="$BASE_URL/api/shops/$SHOP_ID/orders"
+UNLOCK="$BASE_URL/api/shops/$SHOP_ID/staff/unlock"
+COOKIE_JAR="$(mktemp)"
+trap 'rm -f "$COOKIE_JAR"' EXIT
 PASSED=0
 FAILED=0
 
@@ -51,7 +54,7 @@ call() {
   response="$(curl -sS -o - -w $'\n%{http_code}' \
     -X POST "$ENDPOINT" \
     -H "content-type: application/json" \
-    -H "x-dev-staff-token: $STAFF_SESSION_SECRET" \
+    -b "$COOKIE_JAR" \
     "${BYPASS_ARGS[@]}" \
     "$@" \
     --data-binary "$body" 2>/dev/null)"
@@ -88,12 +91,48 @@ echo "  endpoint: $ENDPOINT"
 echo "  number:   $NUM"
 echo
 
-# --- authentication ---------------------------------------------------------------
+# --- authentication (§7.2) --------------------------------------------------------
+# No cookie at all.
 STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT" \
   -H "content-type: application/json" "${BYPASS_ARGS[@]}" \
   --data-binary "{\"action\":\"add\",\"orderNumber\":\"$NUM\"}" 2>/dev/null)"
 BODY=""
 check "no auth is refused" 401
+
+# A wrong PIN must not unlock, and must not leak which part was wrong.
+RESPONSE="$(curl -sS -o - -w $'\n%{http_code}' -X POST "$UNLOCK" \
+  -H "content-type: application/json" "${BYPASS_ARGS[@]}" \
+  --data-binary '{"pin":"000000"}' 2>/dev/null)"
+STATUS="${RESPONSE##*$'\n'}"
+BODY="${RESPONSE%$'\n'*}"
+check "wrong PIN is refused" 401 "invalid_pin"
+
+# The real unlock. -c writes the cc_staff cookie into the jar every later call uses.
+RESPONSE="$(curl -sS -o - -w $'\n%{http_code}' -X POST "$UNLOCK" \
+  -H "content-type: application/json" -c "$COOKIE_JAR" "${BYPASS_ARGS[@]}" \
+  --data-binary "{\"pin\":\"$E2E_STAFF_PIN\"}" 2>/dev/null)"
+STATUS="${RESPONSE##*$'\n'}"
+BODY="${RESPONSE%$'\n'*}"
+check "unlock with the right PIN" 200
+
+if grep -q "cc_staff" "$COOKIE_JAR" 2>/dev/null; then
+  echo "PASS  the unlock set a cc_staff cookie"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL  the unlock did not set a cc_staff cookie; nothing below can pass"
+  FAILED=$((FAILED + 1))
+  echo
+  echo "passed: $PASSED   failed: $FAILED"
+  exit 1
+fi
+
+# A cookie is scoped to one shop by its signature (Phase 2 DoD).
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+  "$BASE_URL/api/shops/no-such-other-shop/orders" \
+  -H "content-type: application/json" -b "$COOKIE_JAR" "${BYPASS_ARGS[@]}" \
+  --data-binary '{"action":"add","orderNumber":"1"}' 2>/dev/null)"
+BODY=""
+check "this shop's cookie is refused on another shop" 401
 
 # --- validation -------------------------------------------------------------------
 call '{ this is not json'
@@ -190,7 +229,7 @@ for i in 1 2; do
     # The trailing newline matters: without it the two files concatenate into one token.
     curl -sS -o /dev/null -w $'%{http_code}\n' -X POST "$ENDPOINT" \
       -H "content-type: application/json" \
-      -H "x-dev-staff-token: $STAFF_SESSION_SECRET" \
+      -b "$COOKIE_JAR" \
       "${BYPASS_ARGS[@]}" \
       --data-binary "{\"action\":\"add\",\"orderNumber\":\"$RACE_NUM\"}" \
       > "$RACE_DIR/$i" 2>/dev/null
@@ -223,6 +262,37 @@ if [[ -n "${CRON_SECRET:-}" ]]; then
 else
   echo "SKIP  cron with the bearer token (CRON_SECRET not set)"
 fi
+
+# --- PIN lockout (§7.2 step 3) ----------------------------------------------------
+# Deliberately last: it locks this IP out of the shop for 15 minutes, so nothing after
+# it could unlock. Five wrong PINs are allowed; the sixth is refused.
+for i in 1 2 3 4 5; do
+  curl -sS -o /dev/null -X POST "$UNLOCK" \
+    -H "content-type: application/json" "${BYPASS_ARGS[@]}" \
+    --data-binary '{"pin":"000000"}' 2>/dev/null
+done
+
+RESPONSE="$(curl -sS -o - -w $'\n%{http_code}' -X POST "$UNLOCK" \
+  -H "content-type: application/json" "${BYPASS_ARGS[@]}" \
+  --data-binary '{"pin":"000000"}' 2>/dev/null)"
+STATUS="${RESPONSE##*$'\n'}"
+BODY="${RESPONSE%$'\n'*}"
+check "sixth wrong PIN in the window is locked out" 429 "pin_locked"
+
+if [[ "$BODY" == *'"retryAfterSeconds"'* ]]; then
+  echo "PASS  the lockout says how long to wait"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL  the lockout carried no retryAfterSeconds: $BODY"
+  FAILED=$((FAILED + 1))
+fi
+
+# Even the correct PIN is refused while locked out.
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$UNLOCK" \
+  -H "content-type: application/json" "${BYPASS_ARGS[@]}" \
+  --data-binary "{\"pin\":\"$E2E_STAFF_PIN\"}" 2>/dev/null)"
+BODY=""
+check "the right PIN is refused while locked out" 429
 
 # --- cleanup ----------------------------------------------------------------------
 if [[ -n "${REPLACEMENT_ID:-}" ]]; then

@@ -8,24 +8,29 @@ ticked — agent items by the agent, **(Ian)** items by Ian. The agent never tic
 
 ## Current status
 
-**Phase 1 — agent side complete.** The whole orders write path is built and, unexpectedly,
-*verified* rather than merely written: the Firestore emulator turns out to run in the sandbox
-(deviation 9), so the security rules and the transaction semantics are proven here rather than
-taken on trust. Two DoD items remain, both needing Ian's Firebase/Vercel setup: the smoke
-script against a real Preview, and the composite indexes showing Enabled in the console.
+**Phase 2 — agent side complete.** Owner sign-in, shop creation, settings, PIN rotation and
+the staff unlock are built, and **Phase 1's `X-Dev-Staff-Token` back door is gone** — the orders
+route now requires a shop-scoped `cc_staff` cookie, with a test asserting the old header is
+refused so it cannot quietly return (deviation 11, discharged).
 
-Phase 0's four credential-dependent items are still open on the same runbook.
+The sandbox turned out to be more capable than §28 assumed for the second phase running: the
+**Auth emulator implements `createSessionCookie`/`verifySessionCookie`**, so the whole §7.1 owner
+flow is exercised for real here rather than mocked (deviation 20). Five of the eight Phase 2 DoD
+items are therefore ticked from this session, including the cross-account 403 that the spec
+expected to need a second Google account.
 
 | Phase | Model used | State |
 |---|---|---|
 | 0 | Opus 5 | Agent half done; 4 DoD items blocked on Ian |
 | — | Opus 5 | PRD amendment applied (seven review findings + spec/reality reconciliation) |
 | 1 | Opus 5 | Agent side complete; 220 tests green; 2 DoD items blocked on Ian |
-| 2–7 | see §28b | Not started — Phase 2 next |
+| 2 | Opus 5 | Agent side complete; 374 tests green; 3 DoD items blocked on Ian |
+| 3–7 | see §28b | Not started — Phase 3 next |
 
-**Test counts this session:** 148 unit, 28 rules, 44 emulator integration. Lint, typecheck and
-`next build` clean. **CI is green** on PR #1 — the first successful run this repo has ever had
-(see deviation 18 for why it had never run at all, and what its first run turned up).
+**Test counts this session:** 251 unit, 34 rules, 89 emulator integration — 374 total, up from
+220. `scripts/orders-smoke.sh` passes 33/33 end to end over HTTP against a local server on the
+emulator, now unlocking with a real PIN rather than a dev header. Lint, typecheck and
+`next build` clean.
 
 ---
 
@@ -96,7 +101,11 @@ Recorded rather than silently worked around (per CLAUDE.md).
     project id comes from `FIREBASE_EMULATOR_PROJECT_ID`, never a credential. With the variable
     unset the fail-closed path is exactly as before.
 
-11. **`X-Dev-Staff-Token` — a deliberate temporary hole. Phase 2 task 4 must remove it.**
+11. **`X-Dev-Staff-Token` — a deliberate temporary hole. DISCHARGED in Phase 2.**
+    The header no longer exists anywhere in the codebase; `requireStaff` verifies the `cc_staff`
+    cookie and `tests/unit/auth.test.ts` asserts the old header is refused, so a revival would
+    fail the suite. Kept here rather than deleted — that the hole existed is the record.
+    Original entry follows.
     Specified by Part H task 2: the orders route is authorised by a header equal to
     `STAFF_SESSION_SECRET` until the `cc_staff` cookie exists. It is inert whenever
     `NODE_ENV === "production"`, compared in constant time, and cannot be shop-scoped — which is
@@ -149,6 +158,74 @@ Recorded rather than silently worked around (per CLAUDE.md).
     one write per second per document, and §14.1's `add` ceiling is 60/min — right at it. Real
     shops run nearer 10/min, so this is a documented ceiling rather than a problem. Revisit only
     if a shop ever approaches the limit; sharding would be overkill at pilot scale.
+
+### Added in Phase 2
+
+20. **§28 is wrong about the emulator a second time — the Auth emulator does session cookies.**
+    Phase 2 was planned around `createSessionCookie` being untestable here. It is not: the Auth
+    emulator implements `createSessionCookie`, `verifySessionCookie` and `revokeRefreshTokens`,
+    and an ID token can be minted through its REST `signInWithCustomToken` endpoint. So §7.1 is
+    proven in-session rather than deployed on faith, and `tests/integration/session.test.ts`
+    exercises the real exchange. **One gap:** the emulator accepts `revokeRefreshTokens` but a
+    previously issued session cookie *still verifies* afterwards. The call is covered; that
+    revocation is honoured can only be confirmed on a real project. Added `auth` to
+    `firebase.json` and to both emulator invocations in CI.
+
+21. **A route collision that would not build.** §13 specifies `/api/shops/{shopId}/pin` and
+    `/api/shops/{shopId}/orders` (id) alongside `/api/shops/{slug}/staff/unlock` (slug). Next.js
+    permits only one dynamic segment *name* per position, so adding `[slug]` beside the existing
+    `[shopId]` fails with "You cannot use different slug names for the same dynamic segment". The
+    URLs are identical either way. Kept `[shopId]`; the unlock handler resolves its parameter as a
+    slug first and falls back to a shop id, and says so in a comment. Renaming the segment was the
+    tidier option but would churn Phase 1's route for no external benefit.
+
+22. **§5's slug regex does not enforce §5's slug prose.** `^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$`
+    accepts a single character (the trailing group is optional) and accepts `a--b`, while the prose
+    says 3–40 characters and no double hyphens. The regex is kept verbatim as the charset check —
+    the spec quotes it — with explicit length and double-hyphen checks beside it in `lib/slugs.ts`.
+    Both gaps are covered by name in `tests/unit/slugs.test.ts`.
+
+23. **`targetPrepSeconds` fell through a gap in the amendment.** §9 defines it (60–3600, default
+    480) and §22.2 uses it, but it never made it into §13's `POST /api/shops` body or §22.4's
+    `/app/new` form. Accepted as optional and defaulted server-side by `SettingsSchema`, so §9
+    stays authoritative and no UI was invented for a field the spec does not ask the owner about.
+
+24. **scrypt at §7.2's parameters exceeds Node's default `maxmem`.** N=2^15, r=8 needs
+    `128 * N * r` = exactly 32 MiB, which trips Node's 32 MiB default and throws "memory limit
+    exceeded". `lib/server/pin.ts` raises `maxmem` explicitly rather than quietly lowering N.
+    Measured at ~110 ms per hash — which is the reason §7.2 checks the lockout *before* hashing,
+    and why that ordering is now load-bearing rather than stylistic: hashing first would give an
+    attacker five free CPU-bound operations per window.
+
+25. **zod refuses `.partial()` on a schema carrying a refinement.** `SettingsSchema` has the
+    `ticketMaxDigits >= ticketMinDigits` rule, and `PATCH /api/shops/{id}` takes a partial settings
+    patch (§13). Split into an unrefined `SettingsObject` (for the patch shape) and the refined
+    `SettingsSchema`. The patch is merged over the shop's stored settings and validated with the
+    refined schema, so a fragment like `{ ticketMinDigits: 5 }` against a stored max of 4 is
+    rejected rather than stored — asserted in `tests/integration/shops.test.ts`.
+
+26. **The PIN lockout does not reuse `lib/server/rateLimit.ts`.** The plan was to generalise one
+    store for both. On reading the code they are genuinely different: §9 gives `pinAttempts` its
+    own document shape (a single `attempts` map) where the orders limiter is bucket-shaped
+    (`add`/`clearAll` in one document), and §7.2 counts *failures* and resets on success where
+    §14.1 counts *accepted* calls and never resets. One abstraction over two shapes and two
+    opposite semantics would obscure both. `lib/server/pinAttempts.ts` shares the pure window
+    helper (`pruneRateLimits`) — the part that actually repeats — and nothing else.
+
+27. **Two error codes have no copy in §23.** §13 defines `401 invalid_token` and
+    `404 shop_not_found`; §23's code→copy map covers neither. Mapped to existing strings rather
+    than inventing new ones — `invalid_token` to the login page's "Sign-in failed — try again",
+    `shop_not_found` to the generic "Something went wrong". Flagged for the Phase 6 copy audit.
+
+28. **The smoke script must run against `next dev`, not `next start`.** `next start` forces
+    `NODE_ENV=production`, and deviation 10's fence makes `adminApp()` refuse the emulator there —
+    correctly. Cost a confusing round of 500s before the fence was recognised as working rather
+    than failing. Noted in the script's own comment so the next person does not repeat it.
+
+29. **`GET /api/slugs/{slug}` has no Firestore rate limit**, per Phase 2 task 2 ("rate-limited by
+    Vercel's defaults"). It is an exact-id read of a document §10 already makes world-readable, so
+    it leaks nothing new; the discipline is that it must never grow into a lookup that returns more
+    than `{ available, reason }`. Revisit at Phase 6 if abuse shows up.
 
 ---
 
@@ -203,16 +280,54 @@ were caught by not taking the spec's install instructions at face value.
 
 ### Phase 2 — Owner auth, shops, PIN
 
-**Model:** Claude Opus 5 — crypto, session cookies, rate limiting, fail-closed config (§28b). Do not downgrade.
+**Model:** Claude Opus 5 — crypto, session cookies, rate limiting, fail-closed config (§28b). Run
+on Opus 5 as specified; not downgraded.
 
-- [ ] On the `dev` alias, Google sign-in completes and `/app` shows "No shops yet." **(Ian)**
-- [ ] Creating `test-shop` via the UI writes `shops/{id}`, `slugs/test-shop`, `private/auth` (hash only, no plaintext), `private/billing` `{ status: "pilot" }`, and `users/{uid}.shopIds` — verified in the Firestore console. **(Ian)**
-- [ ] Creating a shop with a reserved slug → 400 `slug_reserved`; with a taken slug → 409 `slug_taken` (curl with the session cookie).
-- [ ] `PATCH` by a different Google account → 403 (agent uses two seeded session cookies from a second test account Ian creates, or Ian verifies manually). **(Ian if manual)**
-- [ ] `curl -X POST …/staff/unlock` with the right PIN → 200 + `Set-Cookie: cc_staff…; HttpOnly; Secure; SameSite=Lax`; wrong PIN → 401; sixth wrong attempt within 15 min → 429 with `retryAfterSeconds`.
-- [ ] Orders route now rejects requests without `cc_staff` (401) and accepts with it; a cookie for shop A is rejected on shop B (401).
-- [ ] With `STAFF_SESSION_SECRET` removed from a throwaway Preview env, every API route returns 500 (fail-closed), not 200. **(Ian sets the env, agent curls)**
-- [ ] `DELETE /api/auth/session` clears the cookie; a subsequent `/app` request redirects to `/login`.
+- [ ] On the `dev` alias, Google sign-in completes and `/app` shows "No shops yet." **(Ian)** —
+      **blocked:** no Firebase project or Vercel alias. The second half is proven here: against the
+      Auth emulator, a real session cookie renders `/app` with "No shops yet." Only the Google
+      hop itself is unproven, and it needs an authorized domain (§7.1).
+- [ ] Creating `test-shop` via the UI writes `shops/{id}`, `slugs/test-shop`, `private/auth` (hash
+      only, no plaintext), `private/billing` `{ status: "pilot" }`, and `users/{uid}.shopIds` —
+      verified in the Firestore console. **(Ian)** — **blocked:** no Firebase project. Every one of
+      those five writes is asserted against the emulator in `tests/integration/shops.test.ts`,
+      including that the stored hash never contains the PIN.
+- [x] Creating a shop with a reserved slug → 400 `slug_reserved`; with a taken slug → 409
+      `slug_taken`. Proven at the service layer against the emulator; the reserved case is refused
+      before Firestore is touched at all.
+- [x] `PATCH` by a different Google account → 403. **Proven without needing Ian:** the Auth
+      emulator mints two real accounts, and `tests/integration/session.test.ts` asserts the owner
+      gets through, a signed-in stranger gets 403 (not 401, not a silent success) and an unknown
+      shop gets 404.
+- [x] `curl -X POST …/staff/unlock` with the right PIN → 200 + `Set-Cookie: cc_staff…; HttpOnly;
+      SameSite=Lax`; wrong PIN → 401; sixth wrong attempt within 15 min → 429 with
+      `retryAfterSeconds`. All four proven over HTTP in `scripts/orders-smoke.sh`. `Secure` is set
+      whenever `NODE_ENV === "production"`; it is off in the local HTTP run by design, so Ian
+      should confirm the attribute once on the Preview.
+- [x] Orders route now rejects requests without `cc_staff` (401) and accepts with it; a cookie for
+      shop A is rejected on shop B (401). Proven over HTTP and in unit tests. The scope is carried
+      inside the signature, so the cross-shop rejection cannot be forgotten by a caller.
+- [ ] With `STAFF_SESSION_SECRET` removed from a throwaway Preview env, every API route returns 500
+      (fail-closed), not 200. **(Ian sets the env, agent curls)** — **blocked:** no Preview. The
+      equivalent is unit-tested: `requireStaff` throws rather than admitting anyone when the secret
+      is missing.
+- [x] `DELETE /api/auth/session` clears the cookie; a subsequent `/app` request redirects to
+      `/login`. Verified end to end against the emulators: 204, cookie cleared, then
+      `307 → /login?next=%2Fapp`.
+
+**Also closed this session (beyond the written DoD):**
+- [x] Phase 1's `X-Dev-Staff-Token` deleted, with a test asserting it is refused (deviation 11
+      discharged).
+- [x] `app/[slug]/layout.tsx` resolves slug → shop for every screen under `/{slug}`, and `/{slug}`
+      redirects to the display (task 5). The display's hardcoded shop name from Phase 0 is gone.
+- [x] 89 emulator-backed integration tests, including the concurrent slug-claim race — two and
+      five ways — which is Phase 1's `activeNumbers` assertion applied to shop creation.
+- [x] Rules matrix extended to `private/pinAttempts` and to the Phase 2 attack shapes: clearing
+      your own lockout, adding yourself to a user's `shopIds`, repointing a slug at your own shop,
+      making yourself a shop's owner. `firestore.rules` needed no change; these prove it.
+- [x] `scripts/seed-shop.mjs` writes a real scrypt hash, so a seeded shop genuinely unlocks;
+      `scripts/orders-smoke.sh` unlocks with `E2E_STAFF_PIN` and carries the cookie.
+- [x] The Auth emulator added to `firebase.json` and to CI.
 
 ### Phase 3 — Staff console per shop
 

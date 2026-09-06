@@ -73,6 +73,7 @@ beforeEach(async () => {
     });
     await setDoc(doc(admin, "shops", SHOP, "private", "auth"), { pinHash: "scrypt$..." });
     await setDoc(doc(admin, "shops", SHOP, "private", "billing"), { status: "pilot" });
+    await setDoc(doc(admin, "shops", SHOP, "private", "pinAttempts"), { attempts: {} });
     await setDoc(doc(admin, "shops", SHOP, "activeNumbers", "0042"), { orderId: "order1" });
     await setDoc(doc(admin, "slugs", "test-shop"), { shopId: SHOP });
     await setDoc(doc(admin, "users", "uid1"), { email: "owner@example.test" });
@@ -207,5 +208,46 @@ describe("undeclared paths", () => {
 
   it("denies an unmatched subcollection under a shop", async () => {
     await assertFails(getDoc(doc(db, "shops", SHOP, "secrets", "doc1")));
+  });
+});
+
+/**
+ * Phase 2 adds `private/pinAttempts` and makes `users/{uid}` and `private/auth` load
+ * bearing. `firestore.rules` did not change — these assert that it did not need to, and
+ * that the new documents are covered by the existing deny-all rather than by luck.
+ */
+describe("Phase 2 documents", () => {
+  it("refuses private/pinAttempts — reading it would map a shop's lockout state", async () => {
+    await assertFails(getDoc(doc(db, "shops", SHOP, "private", "pinAttempts")));
+  });
+
+  it("cannot clear its own lockout by writing pinAttempts", async () => {
+    // If this ever succeeded, the 5-per-15-minutes PIN limit would be advisory.
+    await assertFails(
+      setDoc(doc(db, "shops", SHOP, "private", "pinAttempts"), { attempts: {} }),
+    );
+    await assertFails(
+      updateDoc(doc(db, "shops", SHOP, "private", "pinAttempts"), { attempts: {} }),
+    );
+    await assertFails(deleteDoc(doc(db, "shops", SHOP, "private", "pinAttempts")));
+  });
+
+  it("cannot add itself to a user's shopIds to claim someone else's shop", async () => {
+    await assertFails(setDoc(doc(db, "users", "uid1"), { shopIds: [SHOP] }));
+    await assertFails(updateDoc(doc(db, "users", "uid1"), { shopIds: [SHOP] }));
+  });
+
+  it("cannot rewrite a slug to point at a shop it controls", async () => {
+    // The slug is the public capability (§5); repointing it would hijack a printed QR.
+    await assertFails(setDoc(doc(db, "slugs", "test-shop"), { shopId: "attacker-shop" }));
+    await assertFails(updateDoc(doc(db, "slugs", "test-shop"), { shopId: "attacker-shop" }));
+  });
+
+  it("cannot make itself the owner of an existing shop", async () => {
+    await assertFails(updateDoc(doc(db, "shops", SHOP), { ownerUid: "attacker" }));
+  });
+
+  it("cannot read a shop's PIN hash even knowing the slug", async () => {
+    await assertFails(getDoc(doc(db, "shops", SHOP, "private", "auth")));
   });
 });

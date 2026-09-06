@@ -26,19 +26,31 @@ export type BillingStatus =
   | "past_due"
   | "canceled";
 
-export const SettingsSchema = z
-  .object({
-    ticketMinDigits: z.number().int().min(1).max(6).default(1),
-    ticketMaxDigits: z.number().int().min(1).max(6).default(4),
-    readyTimeoutSeconds: z.number().int().min(30).max(3600).default(300),
-    targetPrepSeconds: z.number().int().min(60).max(3600).default(480),
-    soundEnabled: z.boolean().default(false),
-    timezone: z.string().min(1).default("Europe/London"),
-  })
-  .refine((s) => s.ticketMaxDigits >= s.ticketMinDigits, {
+/**
+ * The settings fields without the cross-field rule.
+ *
+ * Exported separately because zod refuses `.partial()` on an object carrying
+ * refinements, and `PATCH /api/shops/{id}` takes a partial settings patch (§13). The
+ * patch is merged over the shop's stored settings and then validated with the refined
+ * `SettingsSchema`, so the min/max rule is still enforced on the result — it just cannot
+ * be enforced on a fragment, where it would be meaningless.
+ */
+export const SettingsObject = z.object({
+  ticketMinDigits: z.number().int().min(1).max(6).default(1),
+  ticketMaxDigits: z.number().int().min(1).max(6).default(4),
+  readyTimeoutSeconds: z.number().int().min(30).max(3600).default(300),
+  targetPrepSeconds: z.number().int().min(60).max(3600).default(480),
+  soundEnabled: z.boolean().default(false),
+  timezone: z.string().min(1).default("Europe/London"),
+});
+
+export const SettingsSchema = SettingsObject.refine(
+  (s) => s.ticketMaxDigits >= s.ticketMinDigits,
+  {
     message: "ticketMaxDigits must be >= ticketMinDigits",
     path: ["ticketMaxDigits"],
-  });
+  },
+);
 
 export type Settings = z.infer<typeof SettingsSchema>;
 

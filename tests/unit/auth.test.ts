@@ -1,15 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetServerEnvCache } from "@/lib/env";
 import { requireCron, requireStaff } from "@/lib/server/auth";
 import { ApiError } from "@/lib/server/errors";
+import { STAFF_COOKIE_NAME, signStaffCookie } from "@/lib/server/staffCookie";
 
 const SECRET = "s".repeat(48);
 const CRON = "c".repeat(32);
 
-function env(nodeEnv: string) {
+function env(nodeEnv = "test", secret = SECRET) {
   vi.stubEnv("NODE_ENV", nodeEnv);
   vi.stubEnv("FIREBASE_SERVICE_ACCOUNT_JSON", "e30=");
-  vi.stubEnv("STAFF_SESSION_SECRET", SECRET);
+  vi.stubEnv("STAFF_SESSION_SECRET", secret);
   vi.stubEnv("CRON_SECRET", CRON);
   resetServerEnvCache();
 }
@@ -18,54 +19,88 @@ function req(headers: Record<string, string> = {}) {
   return new Request("https://example.test/api/shops/shop1/orders", { headers });
 }
 
+function withCookie(value: string) {
+  return req({ cookie: `${STAFF_COOKIE_NAME}=${value}` });
+}
+
+function expectUnauthorized(fn: () => void) {
+  expect(fn).toThrow(ApiError);
+  try {
+    fn();
+  } catch (err) {
+    expect((err as ApiError).status).toBe(401);
+    expect((err as ApiError).code).toBe("unauthorized");
+  }
+}
+
+beforeEach(() => env());
 afterEach(() => {
   vi.unstubAllEnvs();
   resetServerEnvCache();
 });
 
-describe("requireStaff (Phase 1 dev header)", () => {
-  it("accepts the dev token outside production", () => {
-    env("development");
-    expect(() => requireStaff(req({ "x-dev-staff-token": SECRET }), "shop1")).not.toThrow();
+/**
+ * §7.2 step 6. Phase 1's `X-Dev-Staff-Token` header is gone (deviation 11, discharged);
+ * the first test here is the one that proves it stays gone.
+ */
+describe("requireStaff", () => {
+  it("no longer accepts the Phase 1 dev header", () => {
+    // The deliberate hole Phase 1 opened. If this ever passes again, the tenant boundary
+    // is off — the header could not be shop-scoped, which is why it had to die.
+    expectUnauthorized(() =>
+      requireStaff(req({ "x-dev-staff-token": SECRET }), "shop1"),
+    );
   });
 
-  it("is inert in production even with the correct token", () => {
-    // This is the guard that keeps a deliberately temporary hole from reaching a real
-    // deployment. Asserted here rather than left to a reading of the code.
-    env("production");
-    expect(() => requireStaff(req({ "x-dev-staff-token": SECRET }), "shop1")).toThrow(ApiError);
-    try {
-      requireStaff(req({ "x-dev-staff-token": SECRET }), "shop1");
-    } catch (err) {
-      expect((err as ApiError).status).toBe(401);
-      expect((err as ApiError).code).toBe("unauthorized");
-    }
+  it("accepts a valid cookie for this shop", () => {
+    expect(() => requireStaff(withCookie(signStaffCookie("shop1")), "shop1")).not.toThrow();
   });
 
-  it("refuses a missing header", () => {
-    env("development");
-    expect(() => requireStaff(req(), "shop1")).toThrow(ApiError);
+  it("refuses a cookie minted for another shop", () => {
+    // The Phase 2 Definition of Done: "a cookie for shop A is rejected on shop B (401)".
+    expectUnauthorized(() => requireStaff(withCookie(signStaffCookie("shopA")), "shopB"));
   });
 
-  it("refuses a wrong token", () => {
-    env("development");
-    expect(() => requireStaff(req({ "x-dev-staff-token": "wrong" }), "shop1")).toThrow(ApiError);
+  it("refuses a missing cookie", () => {
+    expectUnauthorized(() => requireStaff(req(), "shop1"));
   });
 
-  it("refuses a token that is a prefix of the secret", () => {
-    env("development");
-    const prefix = SECRET.slice(0, 10);
-    expect(() => requireStaff(req({ "x-dev-staff-token": prefix }), "shop1")).toThrow(ApiError);
+  it("refuses a garbage cookie", () => {
+    expectUnauthorized(() => requireStaff(withCookie("not-a-cookie"), "shop1"));
+  });
+
+  it("refuses a cookie signed with a different secret", () => {
+    const foreign = signStaffCookie("shop1");
+    env("test", "d".repeat(48));
+    expectUnauthorized(() => requireStaff(withCookie(foreign), "shop1"));
+  });
+
+  it("refuses an expired cookie", () => {
+    const stale = signStaffCookie("shop1", Date.now() - 13 * 3600_000);
+    expectUnauthorized(() => requireStaff(withCookie(stale), "shop1"));
+  });
+
+  it("picks the cookie out from among others", () => {
+    const value = signStaffCookie("shop1");
+    const request = req({ cookie: `other=1; ${STAFF_COOKIE_NAME}=${value}; another=2` });
+    expect(() => requireStaff(request, "shop1")).not.toThrow();
   });
 
   it("fails closed when STAFF_SESSION_SECRET is missing entirely", () => {
     // v1's headline defect was an auth check that passed when its env var was unset.
-    vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("FIREBASE_SERVICE_ACCOUNT_JSON", "e30=");
+    // Here it must throw rather than admit anyone.
+    const value = signStaffCookie("shop1");
     vi.stubEnv("STAFF_SESSION_SECRET", "");
-    vi.stubEnv("CRON_SECRET", CRON);
     resetServerEnvCache();
-    expect(() => requireStaff(req({ "x-dev-staff-token": "" }), "shop1")).toThrow();
+    expect(() => requireStaff(withCookie(value), "shop1")).toThrow();
+  });
+
+  it("is enforced in production too — there is no environment that skips it", () => {
+    env("production");
+    expectUnauthorized(() => requireStaff(req(), "shop1"));
+    expect(() =>
+      requireStaff(withCookie(signStaffCookie("shop1")), "shop1"),
+    ).not.toThrow();
   });
 });
 

@@ -1,46 +1,30 @@
 import "server-only";
 import { serverEnv } from "@/lib/env";
 import { ApiError } from "@/lib/server/errors";
-import { secureEquals } from "@/lib/server/http";
+import { readCookie, secureEquals } from "@/lib/server/http";
+import { STAFF_COOKIE_NAME, verifyStaffCookie } from "@/lib/server/staffCookie";
 
 /**
- * ============================================================================
- * TEMPORARY — PHASE 1 ONLY. DELETE IN PHASE 2.
- * ============================================================================
+ * Staff authorisation (§7.2 step 6).
  *
- * Phase 2 builds the real staff auth: a shop PIN exchanged for a signed HttpOnly
- * `cc_staff` cookie, scoped to one shop for 12 h (§7.2). None of that exists yet, but
- * Phase 1's orders route has to be callable to be testable, so Part H task 2 authorises
- * it with a header carrying `STAFF_SESSION_SECRET`.
+ * Phase 1 authorised this route with an `X-Dev-Staff-Token` header equal to
+ * `STAFF_SESSION_SECRET` — a deliberate, fenced hole, recorded as deviation 11 and
+ * removed here as Phase 2 task 4 requires. Nothing accepts that header any more.
  *
- * This is a deliberate hole and it is fenced accordingly:
- *   - it is inert whenever NODE_ENV === "production" — the check below runs first and
- *     throws, so a production deploy refuses every request rather than accepting the
- *     header;
- *   - the comparison is constant-time;
- *   - it is not shop-scoped, which is exactly why it cannot survive into Phase 2.
+ * Verification is pure crypto against the signed cookie, so this adds no Firestore round
+ * trip to the order write path (§11's < 1.5 s target). The shop scope comes from the
+ * signed payload rather than a lookup: a `cc_staff` minted for shop A cannot be replayed
+ * against shop B, because `shopId` is inside the signature.
  *
- * `tests/unit/auth.test.ts` asserts the production refusal. Recorded in PROGRESS.md
- * under Deviations. Phase 2 task 4 removes this file's contents and wires `requireStaff`
- * to the cookie.
+ * Every failure is the same 401 `unauthorized` with no detail — which attempt failed and
+ * why is not the caller's business, and the console's response is identical in all cases
+ * (re-show the PIN gate).
  */
-const DEV_STAFF_HEADER = "x-dev-staff-token";
-
 export function requireStaff(req: Request, shopId: string): void {
-  // Phase 2 scopes the cookie to shopId; the dev header deliberately cannot be scoped,
-  // which is part of why it must not outlive this phase.
-  void shopId;
+  const result = verifyStaffCookie(readCookie(req, STAFF_COOKIE_NAME));
 
-  if (process.env.NODE_ENV === "production") {
-    throw new ApiError(401, "unauthorized");
-  }
-
-  const provided = req.headers.get(DEV_STAFF_HEADER);
-  if (!provided) throw new ApiError(401, "unauthorized");
-
-  if (!secureEquals(provided, serverEnv().STAFF_SESSION_SECRET)) {
-    throw new ApiError(401, "unauthorized");
-  }
+  if (!result.ok) throw new ApiError(401, "unauthorized");
+  if (result.payload.shopId !== shopId) throw new ApiError(401, "unauthorized");
 }
 
 /**

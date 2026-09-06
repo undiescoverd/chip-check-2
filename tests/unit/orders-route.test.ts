@@ -11,6 +11,7 @@ vi.mock("@/lib/server/orders", () => ({
 
 import { POST } from "@/app/api/shops/[shopId]/orders/route";
 import { resetServerEnvCache } from "@/lib/env";
+import { STAFF_COOKIE_NAME, signStaffCookie } from "@/lib/server/staffCookie";
 import { ApiError } from "@/lib/server/errors";
 import * as orders from "@/lib/server/orders";
 import type { Order } from "@/lib/types";
@@ -43,7 +44,7 @@ function post(body: unknown, headers: Record<string, string> = {}) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-dev-staff-token": SECRET,
+      cookie: `${STAFF_COOKIE_NAME}=${signStaffCookie(SHOP)}`,
       "x-forwarded-for": "203.0.113.7, 10.0.0.1",
       ...headers,
     },
@@ -69,13 +70,13 @@ afterEach(() => {
 
 describe("POST /api/shops/{shopId}/orders — auth", () => {
   it("refuses a request with no staff credential", async () => {
-    const res = await post({ action: "add", orderNumber: "42" }, { "x-dev-staff-token": "" });
+    const res = await post({ action: "add", orderNumber: "42" }, { cookie: "" });
     expect(res.status).toBe(401);
     await expect(res.json()).resolves.toEqual({ error: "unauthorized" });
   });
 
   it("checks auth before parsing the body, so an unauthenticated caller learns nothing", async () => {
-    const res = await post("not json at all", { "x-dev-staff-token": "" });
+    const res = await post("not json at all", { cookie: "" });
     expect(res.status).toBe(401);
   });
 });
