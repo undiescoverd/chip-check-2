@@ -19,11 +19,17 @@ step, say which; otherwise it needs nothing else from you.
 
 1. **Settings → General → set `main` as the repository's default branch.**
 
-That is not cosmetic. Tooling assumes the default branch is the trunk, and it is already
-causing a real miss: CodeRabbit refuses to auto-review pull requests whose base is anything
-other than the default branch, and every feature PR here targets `dev`. So no feature PR gets
-reviewed. `.coderabbit.yaml` in the repo root now names `dev` explicitly as a workaround, but
-other tools will make the same assumption and will not have a config file waiting for them.
+Worth doing because tooling broadly assumes the default branch is the trunk, and this repo's
+trunk is `main` while its day-to-day target is `dev`. CodeRabbit is one instance: it will not
+auto-review a pull request whose base is anything other than the default branch, which is why
+`.coderabbit.yaml` in the repo root names `dev` explicitly.
+
+**That config does not, on its own, get this repo reviewed.** CodeRabbit reads it, then declines
+for a separate reason it does not let you configure: *"this repository does not receive automatic
+reviews because it has fewer than 10 stars."* So until that changes, the way to get a review is
+to comment **`@coderabbitai review`** on the pull request. The config still earns its place — it
+removes the base-branch blocker, so on-demand reviews work and automatic ones would too if the
+star gate ever lifts — but do not expect reviews to start appearing just because it is there.
 
 `dev` is the long-lived staging branch. Feature branches PR into `dev`; `dev` → `main` merges
 are yours alone.
