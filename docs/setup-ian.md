@@ -41,8 +41,12 @@ are yours alone.
 Create **two** projects at <https://console.firebase.google.com>: `chipcheck-dev` and
 `chipcheck-prod`. For **each** one:
 
-1. **Firestore** → Create database → **Native mode** → region **`europe-west2`**.
-   Region is permanent; London keeps latency low for UK shops.
+1. **Firestore** → Create database → **Native mode** → region **`australia-southeast1`**.
+   Region is permanent — chosen for real pilot shops in New Zealand, not the earlier
+   assumption of the UK. There is no GCP region in New Zealand itself; Sydney
+   (`australia-southeast1`) is the nearest, and the more established of the two
+   Australian options (the other being `australia-southeast2`, Melbourne). Use the same
+   region for both `chipcheck-dev` and `chipcheck-prod`.
 2. **Authentication** → Sign-in method → enable **Google**.
 3. **OAuth consent screen** (Google Cloud console → APIs & Services → OAuth consent screen):
    audience **External**, app name, support email, developer contact. No verification is needed
