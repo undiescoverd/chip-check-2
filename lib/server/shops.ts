@@ -27,7 +27,12 @@ export async function getShop(shopId: string): Promise<Shop> {
   return toShop(snap.id, snap.data()!);
 }
 
-/** `slugs/{slug}` → shop (§5). The slug is the public capability; the id is internal. */
+/**
+ * `slugs/{slug}` → shop (§5). The slug is the public capability; the id is internal.
+ *
+ * Server components under `/{slug}` should import `shopForSlug` from
+ * `lib/server/shopPage.ts` instead — same lookup, deduped for the request.
+ */
 export async function getShopBySlug(slug: string): Promise<Shop> {
   const lookup = await adminDb().collection("slugs").doc(slug).get();
   if (!lookup.exists) throw new ApiError(404, "shop_not_found");

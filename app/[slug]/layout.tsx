@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { ShopProvider } from "./ShopProvider";
 import { ApiError } from "@/lib/server/errors";
-import { getShopBySlug } from "@/lib/server/shops";
+import { shopForSlug } from "@/lib/server/shopPage";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +29,7 @@ export default async function SlugLayout({
 }) {
   let shop;
   try {
-    shop = await getShopBySlug(params.slug);
+    shop = await shopForSlug(params.slug);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) notFound();
     throw err;

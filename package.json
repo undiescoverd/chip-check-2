@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "test:rules": "vitest run --config vitest.rules.config.mts",
     "test:e2e": "playwright test",
+    "test:e2e:local": "firebase emulators:exec --only firestore,auth --project demo-chipcheck \"playwright test\"",
     "test:integration": "vitest run --config vitest.integration.config.mts",
     "emulate": "firebase emulators:exec --only firestore,auth --project demo-chipcheck"
   },

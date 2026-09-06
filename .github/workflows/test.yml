@@ -48,6 +48,29 @@ jobs:
       - name: Integration tests (write path, shops, sessions)
         run: npx firebase emulators:exec --only firestore,auth --project demo-chipcheck "npm run test:integration"
 
+      # The staff console in a real browser against a real listener: unlock, add, a second
+      # tablet seeing the card, mark ready, recall, clear, clear all, the double-tap guard,
+      # the undo and the shed nudge. Phase 3's Definition of Done asks for this against the
+      # `dev` alias; until that exists it runs here against the emulator, which is the same
+      # code path minus the network.
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright smoke (staff console)
+        run: npx firebase emulators:exec --only firestore,auth --project demo-chipcheck "npx playwright test"
+
+      # The four widths §24 names, for the pixel comparison against v1 (Ian, by eye).
+      - name: Upload Playwright artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artefacts
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 14
+          if-no-files-found: ignore
+
       - name: No secrets in NEXT_PUBLIC_ variables
         run: |
           if grep -rInE 'NEXT_PUBLIC_[A-Z0-9_]*(SECRET|PRIVATE|SERVICE_ACCOUNT|PASSWORD|PIN)[A-Z0-9_]*\s*=\s*\S' \

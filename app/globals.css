@@ -17,6 +17,27 @@ body {
   .text-balance {
     text-wrap: balance;
   }
+
+  /*
+   * Safe-area padding for the kiosk screens (§24). The viewport is `viewport-fit=cover`,
+   * so the page paints under a notch and under the home indicator; these keep the design
+   * padding everywhere it is already enough and grow only where the hardware needs it.
+   *
+   * A pair of classes rather than Tailwind `pt-[env(...)]` utilities because those would
+   * *replace* `p-4 md:p-6` rather than combine with it, and the padding is part of the
+   * v1 layout being ported.
+   */
+  .safe-pad {
+    padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+      max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  }
+
+  @media (min-width: 768px) {
+    .safe-pad-md-6 {
+      padding: max(1.5rem, env(safe-area-inset-top)) max(1.5rem, env(safe-area-inset-right))
+        max(1.5rem, env(safe-area-inset-bottom)) max(1.5rem, env(safe-area-inset-left));
+    }
+  }
 }
 
 /* Print rules for /{slug}/qr — verbatim from v1 globals.css (§22.3). */

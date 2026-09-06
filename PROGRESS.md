@@ -8,16 +8,18 @@ ticked — agent items by the agent, **(Ian)** items by Ian. The agent never tic
 
 ## Current status
 
-**Phase 2 — agent side complete.** Owner sign-in, shop creation, settings, PIN rotation and
-the staff unlock are built, and **Phase 1's `X-Dev-Staff-Token` back door is gone** — the orders
-route now requires a shop-scoped `cc_staff` cookie, with a test asserting the old header is
-refused so it cannot quietly return (deviation 11, discharged).
+**Phase 3 — agent side complete.** The staff console is built and running: the PIN gate, the
+keypad, the order list, the pending overlay, the Live/Reconnecting dot, the order age, the undo
+after `clear`, the shed nudge and the four modals.
 
-The sandbox turned out to be more capable than §28 assumed for the second phase running: the
-**Auth emulator implements `createSessionCookie`/`verifySessionCookie`**, so the whole §7.1 owner
-flow is exercised for real here rather than mocked (deviation 20). Five of the eight Phase 2 DoD
-items are therefore ticked from this session, including the cross-account 403 that the spec
-expected to need a second Google account.
+The sandbox surprised us a third time, and this one is the biggest of the three. §28 assumed
+Playwright could only ever run against a deployed Preview. It runs here: Chromium is present,
+`next dev` starts against the emulator, and the client Firestore SDK can be pointed at the
+emulator too (deviations 30–31). So **the console is exercised in a real browser against a real
+`onSnapshot` listener** — 18 end-to-end tests including the two-tablet sync, the double-tap
+guard, the undo, the refused undo and the shed nudge. Five of the ten Phase 3 DoD items are
+ticked from this session; the same suite now runs in CI on every pull request, and will run
+unchanged against the `dev` alias by setting `E2E_BASE_URL`.
 
 | Phase | Model used | State |
 |---|---|---|
@@ -25,13 +27,12 @@ expected to need a second Google account.
 | — | Opus 5 | PRD amendment applied (seven review findings + spec/reality reconciliation) |
 | 1 | Opus 5 | Agent side complete; 220 tests green; 2 DoD items blocked on Ian |
 | 2 | Opus 5 | Agent side complete; 374 tests green; 3 DoD items blocked on Ian |
-| 3 | Opus 5 (`lib/useOrders.ts`) | **In progress** — the hook and its pure logic are done; the console port is next, on Sonnet 5 |
+| 3 | Opus 5 (both halves — see the phase note) | Agent side complete; 477 tests green; 4 DoD items blocked on Ian |
 | 4–7 | see §28b | Not started |
 
-**Test counts:** 293 unit, 34 rules, 89 emulator integration — 416 total, up from 220 at the
-start of Phase 2. `scripts/orders-smoke.sh` passes 33/33 end to end over HTTP against a local server on the
-emulator, now unlocking with a real PIN rather than a dev header. Lint, typecheck and
-`next build` clean.
+**Test counts:** 336 unit, 34 rules, 89 emulator integration, 18 Playwright — 477 total, up from
+416 at the start of Phase 3. `scripts/orders-smoke.sh` still passes 33/33 over HTTP against a
+local server on the emulator. Lint, typecheck and `next build` clean.
 
 ---
 
@@ -228,6 +229,73 @@ Recorded rather than silently worked around (per CLAUDE.md).
     it leaks nothing new; the discipline is that it must never grow into a lookup that returns more
     than `{ available, reason }`. Revisit at Phase 6 if abuse shows up.
 
+### Added in Phase 3
+
+30. **§28 is wrong about the sandbox a third time — Playwright runs here.** §28 and Part H task 5
+    both assume the browser suite can only run against a deployed Preview, so the Phase 3
+    Definition of Done makes "Playwright smoke green in CI" wait on the `dev` alias. It does not
+    have to: Chromium is installed, `next dev` starts against the emulator (deviation 28's
+    reasoning applies — `next start` would trip the production fence), and with deviation 31 the
+    browser's own Firestore client reaches the emulator too. The suite therefore drives the real
+    console against a real `onSnapshot` listener, which is the half of this phase that unit tests
+    cannot reach: the pending overlay, the double-tap guard and the two-tablet sync are all
+    timing behaviour. Added `tests/e2e/`, `playwright.config.ts`, `npm run test:e2e:local` and a
+    CI step. It stays pointed at a Preview by setting `E2E_BASE_URL` — same tests, no edits.
+
+31. **The browser Firestore client gained an emulator branch**, mirroring `adminApp()`'s
+    (deviation 10). Taken only when `NEXT_PUBLIC_FIRESTORE_EMULATOR_HOST` is set *and*
+    `NODE_ENV !== "production"`, so it is compiled out of every deployed build; the variable is
+    set only by `playwright.config.ts`. Without it the browser under test would talk to Firestore
+    proper and the realtime half of the console would be untested in the sandbox.
+
+32. **React's `cache` lives in its own module, not on `getShopBySlug`.** `/{slug}/staff` needs the
+    shop *id* to check the `cc_staff` cookie's scope, and the layout has already resolved the same
+    slug — four Firestore reads for one page load of the most-refreshed screen in the product.
+    Wrapping the function in `cache()` where it is defined broke every route handler and unit test
+    that imports it (`cache is not a function`): React 18 exports it only in the server-component
+    build. `lib/server/shopPage.ts` holds the wrapper; server components import that, everything
+    else keeps importing the plain function.
+
+33. **The pure rules came back out of the components.** `formatAge`/`isOverTarget`, the shed
+    count and the keypad's press rules live in `lib/orders/`, not in the `.tsx` files that use
+    them — Next needs `jsx: "preserve"`, which means Vitest cannot import a `.tsx` at all. The
+    constraint pushed in the right direction: `shedCount` now delegates to Phase 1's
+    `shouldClearAll`, so the number on the nudge is produced by the same rule the server applies
+    to the `clearAll` the nudge sends. A test asserts exactly that.
+
+34. **The age recomputes on the hook's 1 s tick, not a new 2 s one.** §22.2 specifies a 2 s tick
+    shared with the display. `useOrders` already re-renders every second for §11's silence check,
+    so the age and the shed count recompute for free; a second timer would tick *less* often than
+    the renders already happening. The spec's actual requirement — no per-card timers — holds.
+
+35. **Safe-area padding is a CSS utility pair, not Tailwind `pt-[env(...)]` classes.** Those
+    utilities *replace* the `p-4 md:p-6` they sit beside rather than adding to it, and that
+    padding is part of the v1 layout being ported. `.safe-pad` / `.safe-pad-md-6` in `globals.css`
+    use `max(1rem, env(safe-area-inset-*))`, so a device with no insets renders the v1 padding
+    exactly and a notched one grows only where the hardware demands. Phase 4 reuses them on the
+    display.
+
+36. **The past-due banner is deferred to Phase 5.** §22.2's console markup includes an amber
+    "Payment problem — ask the owner to update billing." alert marked *[flag on only]*, but Part H
+    task 3 lists only the subscription *modal* for this phase. The banner needs the shop's billing
+    status on the client, which nothing supplies until Phase 5, and inventing a shape for it now
+    would be guessing at that phase's data flow. The modal is wired and unreachable as specified;
+    the banner is not built.
+
+37. **The sandbox's Chromium is a different revision from `@playwright/test`'s.** Playwright 1.63
+    wants build 1243; the image ships 1194 and refuses to launch. `playwright.config.ts` reads an
+    optional `PLAYWRIGHT_CHROMIUM_EXECUTABLE`, which is unset in CI (where
+    `playwright install` provides the matching build) and points at `/opt/pw-browsers/chromium`
+    here. Recorded because the failure message tells you to run `npx playwright install`, which is
+    the one thing that will not work in this environment.
+
+38. **`clearAll`'s 5/min rate limit shapes the e2e suite.** §14.1 limits the destructive action per
+    shop per IP, and the whole suite runs from one IP against one shop. The tests use unique order
+    numbers and clear individual rows rather than calling `clearAll` between tests; only the two
+    tests that are *about* clearing use it. Worth knowing before adding tests: a suite that reset
+    the board in `beforeEach` would start 429ing at the sixth test, and the failure would look
+    like a product bug rather than a test-harness one.
+
 ---
 
 ## Phase checklists
@@ -334,10 +402,14 @@ on Opus 5 as specified; not downgraded.
 
 **Model:** Claude Sonnet 5 for the port; Claude Opus 5 for `lib/useOrders.ts` (pending reducer + status derivation) (§28b).
 
-Split as §28b directs, with the Opus half first because the console is written against the
-hook's interface — building the port first would mean guessing at it and reworking.
+**Model actually used: Opus 5 for both halves** — an upgrade on §28b's split for the port, not a
+downgrade. The port ran in the same session as the hook it is written against, and the session
+also had to decide whether the browser suite could run in the sandbox at all (deviation 30) and
+work out three build-level constraints that only surfaced when the port was wired up (deviations
+31–33). Splitting the session to hand the port to Sonnet would have cost the context that made
+those calls quick.
 
-**Done (Opus 5):**
+**Done (Opus 5) — the hook and its pure logic:**
 - [x] `lib/orders/connection.ts` — §11's status derivation, pure. Four disconnected
       conditions including the one that matters: a visible tab with no error, `navigator.onLine`
       true and cache-sourced snapshots still arriving is *silently stale*, and nothing else in
@@ -351,20 +423,39 @@ hook's interface — building the port first would mean guessing at it and rewor
 - [x] `lib/useOrders.ts` — the wiring: `onSnapshot` with `includeMetadataChanges`, the
       online/offline/visibilitychange listeners, and a 1 s tick for the elapsed-time rules.
 
-**Remaining (Sonnet 5):** the §22.2 port — `Keypad`, `OrderCard`, the console page and PIN gate,
-`lib/api.ts` error-code mapping, the modals, reduced-motion and safe-area handling, and the
-Playwright smoke.
+**Done (Opus 5) — the §22.2 port:**
+- [x] `Keypad`, `OrderCard`, `PinGate`, `StaffConsole`, the four modals, and
+      `app/[slug]/staff/page.tsx` — the server component that reads `cc_staff` and decides which
+      of the two the tablet sees. Classes verbatim from §22.2.
+- [x] `lib/api.ts` — the code → copy map (§23) and the client half of §14's error contract.
+      Every failure is a result, never a throw, because the console branches on *which* failure:
+      a duplicate opens a modal, a 402 opens a different one, a 401 sends the tablet to the gate.
+- [x] Reduced motion (§24): `motion-reduce:transition-none` on the keys, and NextUI's modals get
+      `disableAnimation` under `prefers-reduced-motion` — framer-motion does not consult the media
+      query on its own, so without that a reduced-motion user still gets the scale-in.
+- [x] Safe-area handling (§24): `viewport-fit=cover` in the viewport export plus the `.safe-pad`
+      utilities (deviation 35).
 
-- [ ] `test-shop` set to digits 2–5: the Add button enables only for 2–5 digit input; keypad stops at 5; server rejects a 6-digit number with 400 even if forced via curl.
-- [ ] Add on tablet A → card appears on tablet B within 1.5 s (Ian, two devices or two browsers on the `dev` alias; measured by eye against the display clock). **(Ian)**
-- [ ] Double-tapping Ready fires exactly one request (Playwright counts network calls).
-- [ ] Wrong PIN shows "Wrong PIN" inline without leaving the gate; correct PIN shows the console without reload flicker.
-- [ ] Kill the network on the tablet for 30 s: the header dot flips to amber "Reconnecting" (this is the whole point — writes would still succeed over HTTP, so without the dot the tablet looks healthy while its list goes stale), buttons produce "Couldn't reach the server", state reconciles when back online. **(Ian)**
-- [ ] With `targetPrepSeconds` set low on `test-shop`, a card's age crosses the threshold and switches to the heavier pill treatment, with no colour change to the row.
-- [ ] `Clear` shows the undo alert; Undo within 10 s restores the card; the alert dismisses on the next mutation; undoing a number that has been re-added shows "Couldn't undo — #{orderNumber} is active again".
-- [ ] The shed nudge appears only when ready orders exceed `readyTimeoutSeconds`, its count matches, and clearing it leaves preparing orders untouched.
-- [ ] Layout matches v1 at 390, 768, 1024, 1280 widths (Ian compares against the v1 site side by side; agent provides Playwright screenshots at those widths as PR artefacts). **(Ian)**
-- [ ] Playwright smoke green in CI against the `dev` alias.
+- [x] `test-shop` set to digits 2–5: the Add button enables only for 2–5 digit input; keypad stops at 5; server rejects a 6-digit number with 400 even if forced via curl. **Proven end to end** — the keypad cap, the button's enabled range and the forced 6-digit 400 are three Playwright assertions.
+- [ ] Add on tablet A → card appears on tablet B within 1.5 s (Ian, two devices or two browsers on the `dev` alias; measured by eye against the display clock). **(Ian)** — the *mechanism* is proven here: two browser pages on one shop, and every add / markReady / recall / clear appears on the second. What Ian's version adds is the real network and the real 1.5 s, which a loopback emulator cannot measure honestly.
+- [x] Double-tapping Ready fires exactly one request (Playwright counts network calls). Needed two guards, not one: the pending set disables the button from the *next* render, so an in-flight `Set` in a ref refuses the second tap before React has repainted. The test double-clicks and asserts exactly one POST.
+- [x] Wrong PIN shows "Wrong PIN" inline without leaving the gate; correct PIN shows the console without reload flicker. "No reload" is asserted by a `window` marker surviving the unlock — `framenavigated` is the wrong instrument, because Next's router touches the History API on a `refresh()` and reports a navigation the user never sees.
+- [ ] Kill the network on the tablet for 30 s: the header dot flips to amber "Reconnecting" (this is the whole point — writes would still succeed over HTTP, so without the dot the tablet looks healthy while its list goes stale), buttons produce "Couldn't reach the server", state reconciles when back online. **(Ian)** — needs a real network to kill. The derivation behind the dot is unit-tested (12 tests, §11's four disconnected conditions) and the "Live" state is asserted in the browser; what is unproven is the transition on real hardware.
+- [x] With `targetPrepSeconds` set low on `test-shop`, a card's age crosses the threshold and switches to the heavier pill treatment, with no colour change to the row. Done the other way round — the order is backdated rather than the target lowered, which is the same comparison and does not leave the shop's settings modified for the next test. The assertion includes that the row is still `bg-preparing` (§20, The No-Third-Colour Rule).
+- [x] `Clear` shows the undo alert; Undo within 10 s restores the card; the alert dismisses on the next mutation; undoing a number that has been re-added shows "Couldn't undo — #{orderNumber} is active again". All four, as three Playwright tests. The restored card comes back **ready** when it was cleared while ready, which is §13's `status`-untouched guarantee seen from the UI.
+- [x] The shed nudge appears only when ready orders exceed `readyTimeoutSeconds`, its count matches, and clearing it leaves preparing orders untouched. The count matching is structural rather than tested-by-example: the nudge and the request it sends share one `shouldClearAll` call (deviation 33).
+- [ ] Layout matches v1 at 390, 768, 1024, 1280 widths (Ian compares against the v1 site side by side; agent provides Playwright screenshots at those widths as PR artefacts). **(Ian)** — the four screenshots are produced by the suite and uploaded by CI as **playwright-artefacts**.
+- [ ] Playwright smoke green in CI against the `dev` alias. — **blocked on the alias, not on the suite.** 18 tests are green in CI against the emulator on every pull request; pointing them at the alias is setting `E2E_BASE_URL` (deviation 30). Two of the 18 skip themselves in that mode because they backdate a document to avoid an eight-minute wait.
+
+**Also closed this session (beyond the written DoD):**
+- [x] Playwright runs in the sandbox at all (deviation 30) — the assumption in §28 that it could
+      not is the reason five of these items were expected to wait for Ian.
+- [x] The duplicate modal, the Clear All confirmation and the shed modal are each driven and
+      asserted by copy, not by test id — §23's strings are now checked by the suite rather than by
+      reading them.
+- [x] The undo alert is `role="status"` (§25) and the suite asserts it, rather than trusting that
+      NextUI forwards the prop.
+- [x] `lib/server/shopPage.ts` — one slug lookup per request instead of two (deviation 32).
 
 ### Phase 4 — Customer display + QR per shop
 

@@ -120,6 +120,9 @@ production values:
   `node scripts/seed-shop.mjs --slug=test-shop --pin=<that value>`, and
   `scripts/orders-smoke.sh` exchanges it for a `cc_staff` cookie. Without it the smoke test
   refuses to run — Phase 2 removed the dev header it used to authenticate with (§7.2).
+- `E2E_BASE_URL` — **new in Phase 3.** The `dev` alias. Setting it points the Playwright suite at
+  the deployed console instead of a local server; leaving it unset runs the same tests here
+  against the emulator, which is what CI does on every pull request.
 
 ---
 
@@ -172,6 +175,17 @@ is the agent's to run; it needs nothing else from you first.
 - A wrong PIN six times in 15 minutes → 429 with `retryAfterSeconds`
 - `Set-Cookie: cc_staff…` carries **`Secure`** on the Preview (it is deliberately off over local
   HTTP, so this is the one attribute the sandbox cannot prove)
+
+**Phase 3 — the staff console**
+
+- Two tablets (or two browser windows) on `<dev alias>/test-shop/staff`: adding on one puts the
+  card on the other inside 1.5 s, measured against the display clock
+- Kill the tablet's wifi for 30 seconds: the header dot turns amber and says **Reconnecting**,
+  buttons say "Couldn't reach the server", and the list reconciles when it comes back. This is
+  the one that matters — without the dot a stale tablet looks perfectly healthy
+- Side-by-side against the v1 console at 390, 768, 1024 and 1280 px. The agent's screenshots at
+  those widths are attached to the CI run (**playwright-artefacts**) so you can compare without a
+  tablet in hand
 
 **Needs one extra thing from you:** the fail-closed check. Remove `STAFF_SESSION_SECRET` from a
 throwaway Preview environment and tell the agent — every API route must then return 500, not 200.
