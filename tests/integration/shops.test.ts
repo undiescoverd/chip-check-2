@@ -4,6 +4,7 @@ import { resetFlagsCache } from "@/lib/server/entitlement";
 import { verifyPin } from "@/lib/server/pin";
 import {
   PIN_MAX_ATTEMPTS,
+  PIN_SHOP_WIDE_MAX_ATTEMPTS,
   assertNotLockedOut,
   clearAttempts,
   recordFailedAttempt,
@@ -228,6 +229,45 @@ describe("PIN lockout (§7.2 step 3)", () => {
 
     await expectApiError(assertNotLockedOut(shop.id, IP));
     await expect(assertNotLockedOut(shop.id, "198.51.100.9")).resolves.toBeUndefined();
+  });
+
+  it("locks the whole shop once enough fake identities have each failed once, defeating an X-Forwarded-For bypass", async () => {
+    // The bug this closes: `clientIp()` trusts a client-suppliable header (§ security
+    // review), so an attacker who sets a different fake IP on every request gets a fresh,
+    // empty per-IP bucket every time and the per-IP lockout alone never triggers. The
+    // shop-wide bucket is keyed by a fixed string, not an identity, so it still counts
+    // every one of these as a failure against this shop.
+    const shop = await createShop(UID, input());
+
+    for (let i = 0; i < PIN_SHOP_WIDE_MAX_ATTEMPTS; i += 1) {
+      const fakeIp = `203.0.113.${i}`;
+      await expect(assertNotLockedOut(shop.id, fakeIp)).resolves.toBeUndefined();
+      await recordFailedAttempt(shop.id, fakeIp);
+    }
+
+    // A brand-new fake identity, never seen before — the per-IP bucket for it is empty,
+    // but the shop is locked regardless.
+    const err = await expectApiError(assertNotLockedOut(shop.id, "203.0.113.999"));
+    expect(err.status).toBe(429);
+    expect(err.code).toBe("pin_locked");
+  });
+
+  it("does not let a correct PIN on one IP erase an attack building up on others", async () => {
+    const shop = await createShop(UID, input());
+
+    // A real attack in progress from several fake identities, one short of the shop-wide
+    // ceiling.
+    for (let i = 0; i < PIN_SHOP_WIDE_MAX_ATTEMPTS - 1; i += 1) {
+      await recordFailedAttempt(shop.id, `203.0.113.${i}`);
+    }
+
+    // A legitimate device gets the PIN right on the very next try.
+    await clearAttempts(shop.id, "198.51.100.50");
+
+    // The shop-wide count from the attack is untouched by that unrelated success — one
+    // more failure from anywhere locks it.
+    await recordFailedAttempt(shop.id, "203.0.113.999");
+    await expectApiError(assertNotLockedOut(shop.id, "203.0.113.1000"));
   });
 
   it("resets on a correct PIN (§7.2 step 4)", async () => {

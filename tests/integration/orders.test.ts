@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { UNDO_WINDOW_MS } from "@/lib/orders/rules";
+import { clearOrders } from "@/lib/server/clearing";
 import { resetFlagsCache } from "@/lib/server/entitlement";
 import { addOrder, clear, clearAll, markReady, recall, unclear } from "@/lib/server/orders";
 import { purgeAll, purgeShop } from "@/lib/server/purge";
@@ -336,9 +337,31 @@ describe("clearAll", () => {
     expect(await lockExists(SHOP, "1")).toBe(true);
   });
 
-  it("clears more orders than fit in a single batch", async () => {
-    // 260 orders is 520 writes — past Firestore's 500-write batch cap, so this fails if
-    // the chunk size is wrong.
+  it("does not release a re-added order's lock when working from a stale snapshot", async () => {
+    // The bug this closes (first code review of this codebase): `clearOrders` used to
+    // delete `activeNumbers/{orderNumber}` unconditionally, trusting that the caller's
+    // order list was still uncleared. `a` here plays that stale snapshot — captured
+    // *before* it was cleared and a new order took its number, exactly what a `clearAll`
+    // query running just ahead of this interleaving would have read.
+    const a = await addOrder(SHOP, "0042", IP);
+    await clear(SHOP, a.id);
+    const b = await addOrder(SHOP, "0042", IP);
+
+    const result = await clearOrders(SHOP, [a], "clearAll");
+
+    // `a` was already cleared by the time this ran, so it's not counted again...
+    expect(result).toBe(0);
+    // ...and critically, b's lock — the one actually live right now — is untouched.
+    expect(await lockHolder(SHOP, "0042")).toBe(b.id);
+    expect((await rawOrder(SHOP, b.id))?.cleared).toBe(false);
+
+    // With the lock still held, the number cannot be taken a third time.
+    const err = await expectApiError(addOrder(SHOP, "0042", IP));
+    expect(err.code).toBe("duplicate_order");
+  });
+
+  it("clears more orders than fit in one concurrency chunk", async () => {
+    // 260 orders exceeds ORDERS_PER_BATCH (250), so this fails if the chunking is wrong.
     const shop = "bulk-shop";
     await seedShop(shop, { ticketMaxDigits: 4 });
     // A distinct IP per add: the §14.1 limit is 60/min per IP, and this test is about
