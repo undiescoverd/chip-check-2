@@ -8,6 +8,15 @@ ticked — agent items by the agent, **(Ian)** items by Ian. The agent never tic
 
 ## Current status
 
+**Post-Phase-4 — first code and security review.** `/code-review` and `/security-review` ran
+against `dev` @ `a8e7534` — the first review this codebase has had; no human review, and
+CodeRabbit auto-review is disabled repo-wide (< 10 stars). Two confirmed, high-confidence findings
+came back, both fixed: a stale-snapshot race in `clearOrders` that could let a re-added order's
+dedupe lock be deleted out from under it (deviation 40), and a PIN-lockout bypass via a spoofed
+`X-Forwarded-For` header that allowed unlimited PIN guesses against a shop (deviation 41). Both
+are on the write path Phase 5 (billing) is about to build on top of, so fixing them now rather
+than after was the right order.
+
 **Phase 4 — agent side complete.** The customer board is built and running: the two columns
 sliding a tile between them on one `LayoutGroup`, the ready-timeout drop-off (display-only, per
 CLAUDE.md — `preparing` orders never auto-clear anywhere), the chime with its seed-don't-chime
@@ -305,6 +314,40 @@ Recorded rather than silently worked around (per CLAUDE.md).
     region is locked in permanently once the database exists. `docs/setup-ian.md` §2 corrected to
     match; `chipcheck_v2.md` is left as written, per this file's own rule that a wrong plan is
     recorded here rather than edited into the spec.
+
+40. **`clearOrders` is per-order transactions, not a Firestore batch.** First code review of this
+    codebase (Phases 0–4, `dev` @ `a8e7534`) found that the batch-write version deleted an order's
+    `activeNumbers` lock unconditionally, without checking it still pointed to that order —
+    unlike the single-order `clear()` transaction, which does check. A stale snapshot (`clearAll`'s
+    own query, or the purge's) plus a clear-then-re-add of the same order number in between let the
+    batch delete a *different*, currently-active order's lock, reopening that number for a third
+    caller while the real order was still live — defeating the one invariant the lock exists to
+    enforce. Fixed by giving `clearOrders` the same guard `clear()` already has: each order is
+    re-read fresh inside its own transaction, and the lock is only deleted if it still points to
+    that order. Run in bounded-concurrency groups (`ORDERS_PER_BATCH`, repurposed from a batch-size
+    cap to a concurrency width — transactions on different order docs never contend with each
+    other) rather than serially, so this costs more round trips than one batch commit but no
+    correctness. The returned count can now legitimately be less than the input list's length if
+    something raced in the meantime — more honest than the old blind count. Regression test:
+    `tests/integration/orders.test.ts`, "does not release a re-added order's lock when working
+    from a stale snapshot".
+
+41. **PIN lockout gets a shop-wide ceiling, beyond what §7.2 specifies.** Same review pass: the
+    5-attempts/15-min lockout is keyed by `sha256(clientIp(req))`, and `clientIp()` trusts the
+    first entry of the client-suppliable `X-Forwarded-For` header. An attacker setting a different
+    fake value on every request got a fresh, empty bucket every time — unlimited PIN guesses
+    against a shop, whose slug is public by design (it's on the QR code). Rather than try to
+    "correctly" parse `X-Forwarded-For` — Vercel's exact header-composition behaviour isn't
+    verifiable from this sandbox, and guessing at proxy semantics for a security control is how
+    this kind of bug happens — added a second bucket to the same `attempts` map, keyed by a fixed
+    string (`"shop-wide"`) instead of an identity, capped at 20 failures per 15 minutes regardless
+    of how many identities an attacker claims. High enough that the existing "locks one IP without
+    locking another" test needed no change; low enough to turn "unlimited, instantly" into "days,
+    minimum" for a 4-digit PIN. `lib/server/http.ts`'s `clientIp()` comment corrected — it
+    previously asserted "the first hop is the client" as fact, which is the assumption that made
+    this bug possible. Regression tests: `tests/integration/shops.test.ts`, "locks the whole shop
+    once enough fake identities have each failed once" and "does not let a correct PIN on one IP
+    erase an attack building up on others".
 
 ---
 

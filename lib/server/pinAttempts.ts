@@ -15,10 +15,21 @@ import { privateRef } from "@/lib/server/shops";
  * §7.2 counts *failures* and resets on success. Forcing one abstraction over two
  * different shapes and two opposite semantics would obscure both. The pure window
  * helper — `pruneRateLimits` — is shared, which is the part that actually repeats.
+ *
+ * **Addition beyond §7.2, from the first security review of this codebase:** the per-IP
+ * key above is `clientIp()`'s reading of `X-Forwarded-For` (see `lib/server/http.ts`),
+ * which a caller can set to a different value on every request. Fragmenting across fake
+ * identities gets a fresh, empty bucket every time, making the per-IP lockout alone no
+ * lockout at all. `SHOP_WIDE_KEY` is a second bucket in the same map, keyed by a fixed
+ * string rather than an identity, so the total number of failures against a shop is
+ * bounded regardless of how many identities an attacker claims. It cannot collide with a
+ * real `sha256(ip)` key: those are always 64 lowercase hex characters, this is not.
  */
 
 export const PIN_MAX_ATTEMPTS = 5;
 export const PIN_WINDOW_MS = 15 * 60 * 1000;
+export const PIN_SHOP_WIDE_MAX_ATTEMPTS = 20;
+export const SHOP_WIDE_KEY = "shop-wide";
 
 export type Attempts = Record<string, RateLimitEntry>;
 
@@ -96,6 +107,10 @@ export function recordFailure(
  * The order matters: scrypt at N=2^15 costs ~110 ms, so hashing first would hand an
  * attacker five free CPU-bound operations per window. Throws 429 `pin_locked` without
  * writing — a refused attempt must not extend its own lockout.
+ *
+ * Checks both buckets: the per-IP one (unchanged from §7.2) and the shop-wide one added
+ * above. Either being locked is enough to refuse the request, and the caller gets
+ * whichever `retryAfterSeconds` is longer so the response never undersells the wait.
  */
 export async function assertNotLockedOut(
   shopId: string,
@@ -104,14 +119,23 @@ export async function assertNotLockedOut(
 ): Promise<void> {
   const snap = await pinAttemptsRef(shopId).get();
   const attempts = readAttempts(snap.exists ? snap.data() : {});
-  const decision = pinLockoutDecision(attempts[hashIp(ip)], nowMs);
+  const perIp = pinLockoutDecision(attempts[hashIp(ip)], nowMs);
+  const shopWide = pinLockoutDecision(attempts[SHOP_WIDE_KEY], nowMs, PIN_SHOP_WIDE_MAX_ATTEMPTS);
 
-  if (decision.locked) {
-    throw new ApiError(429, "pin_locked", { retryAfterSeconds: decision.retryAfterSeconds });
+  if (perIp.locked || shopWide.locked) {
+    throw new ApiError(429, "pin_locked", {
+      retryAfterSeconds: Math.max(perIp.retryAfterSeconds, shopWide.retryAfterSeconds),
+    });
   }
 }
 
-/** §7.2 step 4, wrong PIN: increment. Written as a full `set` so pruning actually removes. */
+/**
+ * §7.2 step 4, wrong PIN: increment. Written as a full `set` so pruning actually removes.
+ *
+ * Increments the shop-wide bucket alongside the caller's own — both are failures against
+ * the same shop, and the shop-wide count is what stays meaningful even when the per-IP
+ * key changes on every request.
+ */
 export async function recordFailedAttempt(
   shopId: string,
   ip: string,
@@ -125,7 +149,9 @@ export async function recordFailedAttempt(
     const attempts = readAttempts(snap.exists ? snap.data() : {});
     // A full set, not a merge: Firestore merges nested maps recursively, so a merged
     // write would resurrect the entries pruning just dropped.
-    tx.set(ref, { attempts: recordFailure(attempts, key, nowMs) });
+    const withIp = recordFailure(attempts, key, nowMs);
+    const withShopWide = recordFailure(withIp, SHOP_WIDE_KEY, nowMs);
+    tx.set(ref, { attempts: withShopWide });
   });
 }
 

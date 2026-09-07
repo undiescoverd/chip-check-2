@@ -28,9 +28,16 @@ export async function parseBody<T extends z.ZodType>(
 
 /**
  * Caller IP for rate limiting (§14.1): the first hop of `x-forwarded-for`, else
- * `x-real-ip`. Behind Vercel the first hop is the client; the header is attacker-
- * controlled in principle, which is why it is only ever used as a rate-limit key and
- * never as an identity.
+ * `x-real-ip`.
+ *
+ * This is attacker-influenceable, not just "in principle" — a caller can set
+ * `X-Forwarded-For` to a different value on every request, and there is no way from
+ * inside this function to tell that apart from a real proxy chain. That is exactly what
+ * made the per-IP PIN lockout in `pinAttempts.ts` bypassable (first security review of
+ * this codebase): fragmenting across fake values got a fresh, empty bucket every time.
+ * This value must never be the *sole* control anywhere it gates something worth
+ * protecting — `pinAttempts.ts`'s shop-wide bucket is what actually bounds that endpoint
+ * now, not a better reading of this header.
  */
 export function clientIp(req: Request): string {
   const forwarded = req.headers.get("x-forwarded-for");
